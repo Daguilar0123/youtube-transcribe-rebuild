@@ -1,116 +1,313 @@
-.logo.vite:hover {
-  filter: drop-shadow(0 0 2em #747bff);
-}
-
-.logo.typescript:hover {
-  filter: drop-shadow(0 0 2em #2d79c7);
-}
 :root {
-  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
-  font-size: 16px;
-  line-height: 24px;
-  font-weight: 400;
-
-  color: #0f0f0f;
-  background-color: #f6f6f6;
-
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #202124;
+  background: #f4f5f1;
+  font-size: 15px;
+  line-height: 1.4;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  -webkit-text-size-adjust: 100%;
 }
 
-.container {
+* {
+  box-sizing: border-box;
+}
+
+body {
   margin: 0;
-  padding-top: 10vh;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  text-align: center;
+  min-width: 940px;
+  min-height: 700px;
 }
 
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: 0.75s;
-}
-
-.logo.tauri:hover {
-  filter: drop-shadow(0 0 2em #24c8db);
-}
-
-.row {
-  display: flex;
-  justify-content: center;
-}
-
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-
-a:hover {
-  color: #535bf2;
-}
-
-h1 {
-  text-align: center;
-}
-
+button,
 input,
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  color: #0f0f0f;
-  background-color: #ffffff;
-  transition: border-color 0.25s;
-  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
+select,
+textarea {
+  font: inherit;
 }
 
 button {
+  border: 1px solid #b7beb4;
+  border-radius: 6px;
+  background: #fff;
+  color: #202124;
+  min-height: 36px;
+  padding: 0 14px;
   cursor: pointer;
 }
 
-button:hover {
-  border-color: #396cd8;
+button:hover:not(:disabled) {
+  border-color: #4f6f52;
 }
-button:active {
-  border-color: #396cd8;
-  background-color: #e8e8e8;
+
+button:disabled {
+  color: #8d948b;
+  cursor: not-allowed;
+}
+
+button.primary {
+  background: #2f5d50;
+  border-color: #2f5d50;
+  color: #fff;
+  font-weight: 650;
+}
+
+button.secondary {
+  background: #f9faf7;
+}
+
+button.tab {
+  border: 0;
+  border-bottom: 3px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  min-width: 140px;
+}
+
+button.tab.active {
+  border-bottom-color: #2f5d50;
+  font-weight: 700;
+}
+
+button.link-button {
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  padding: 4px 0;
+  color: #245d8f;
+  min-height: 0;
+}
+
+.app-shell {
+  width: min(1120px, calc(100vw - 32px));
+  margin: 0 auto;
+  padding: 22px 0 30px;
+}
+
+.topbar,
+.action-row,
+.log-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 28px;
+  line-height: 1.1;
+}
+
+h2 {
+  font-size: 15px;
+  margin-bottom: 10px;
+}
+
+.topbar p,
+.log-header span,
+.job-status {
+  color: #5d655c;
+}
+
+.status-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 18px 0;
+}
+
+.tool-status {
+  border: 1px solid #d4d9d1;
+  border-left-width: 4px;
+  border-radius: 6px;
+  background: #fff;
+  padding: 10px;
+  min-height: 64px;
+}
+
+.tool-status.ok {
+  border-left-color: #2f7d4f;
+}
+
+.tool-status.missing {
+  border-left-color: #b84c42;
+}
+
+.tool-status strong,
+.tool-status span {
+  display: block;
+}
+
+.tool-status span {
+  color: #60675e;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tabs {
+  display: flex;
+  border-bottom: 1px solid #d8ddd4;
+  margin-bottom: 16px;
+}
+
+.workflow-panel {
+  display: none;
+}
+
+.workflow-panel.active {
+  display: block;
+}
+
+.form-grid,
+.shared-settings {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+.shared-settings {
+  grid-template-columns: 1fr 180px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid #d8ddd4;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.field.full,
+.prompt-field {
+  grid-column: 1 / -1;
+}
+
+.field.compact {
+  grid-column: auto;
+}
+
+.field span,
+.checkbox-field span {
+  color: #3d443c;
+  font-weight: 650;
+  font-size: 13px;
 }
 
 input,
-button {
-  outline: none;
+select,
+textarea {
+  width: 100%;
+  border: 1px solid #bfc6bc;
+  border-radius: 6px;
+  background: #fff;
+  color: #202124;
+  min-height: 38px;
+  padding: 8px 10px;
 }
 
-#greet-input {
-  margin-right: 5px;
+textarea {
+  resize: vertical;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #f6f6f6;
-    background-color: #2f2f2f;
+.picker-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+}
+
+.checkbox-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding-top: 22px;
+}
+
+.checkbox-field input {
+  width: 16px;
+  min-height: 16px;
+}
+
+.action-row {
+  margin: 18px 0;
+  justify-content: flex-start;
+}
+
+.job-status {
+  margin-left: auto;
+  font-weight: 650;
+}
+
+.work-area {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.8fr);
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.steps,
+.outputs,
+.log-panel {
+  border: 1px solid #d4d9d1;
+  border-radius: 8px;
+  background: #fff;
+  padding: 14px;
+}
+
+#progress-list,
+#output-list {
+  margin: 0;
+  padding-left: 20px;
+  min-height: 80px;
+}
+
+#progress-list li {
+  margin: 4px 0;
+}
+
+#output-list {
+  list-style: none;
+  padding-left: 0;
+}
+
+#log-output {
+  height: 240px;
+  overflow: auto;
+  margin: 10px 0 0;
+  padding: 12px;
+  border-radius: 6px;
+  background: #151917;
+  color: #e6efe8;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+@media (max-width: 980px) {
+  body {
+    min-width: 0;
   }
 
-  a:hover {
-    color: #24c8db;
+  .app-shell {
+    width: calc(100vw - 24px);
   }
 
-  input,
-  button {
-    color: #ffffff;
-    background-color: #0f0f0f98;
-  }
-  button:active {
-    background-color: #0f0f0f69;
+  .status-grid,
+  .form-grid,
+  .shared-settings,
+  .work-area {
+    grid-template-columns: 1fr;
   }
 }

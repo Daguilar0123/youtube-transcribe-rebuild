@@ -4,40 +4,151 @@
     <meta charset="UTF-8" />
     <link rel="stylesheet" href="/src/styles.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Tauri App</title>
+    <title>YouTube Transcribe</title>
     <script type="module" src="/src/main.ts" defer></script>
   </head>
-
   <body>
-    <main class="container">
-      <h1>Welcome to Tauri</h1>
+    <main class="app-shell">
+      <section class="topbar">
+        <div>
+          <h1>YouTube Transcribe</h1>
+          <p>Local transcripts from YouTube captions, ffmpeg, and whisper.cpp.</p>
+        </div>
+        <button id="refresh-env" class="secondary" type="button">Check Tools</button>
+      </section>
 
-      <div class="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/src/assets/vite.svg" class="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img
-            src="/src/assets/tauri.svg"
-            class="logo tauri"
-            alt="Tauri logo"
-          />
-        </a>
-        <a href="https://www.typescriptlang.org/docs" target="_blank">
-          <img
-            src="/src/assets/typescript.svg"
-            class="logo typescript"
-            alt="typescript logo"
-          />
-        </a>
-      </div>
-      <p>Click on the Tauri logo to learn more about the framework</p>
+      <section class="status-grid" id="environment-status"></section>
 
-      <form class="row" id="greet-form">
-        <input id="greet-input" placeholder="Enter a name..." />
-        <button type="submit">Greet</button>
-      </form>
-      <p id="greet-msg"></p>
+      <section class="tabs" role="tablist" aria-label="Input mode">
+        <button id="youtube-tab" class="tab active" type="button">YouTube URL</button>
+        <button id="local-tab" class="tab" type="button">Local Media</button>
+      </section>
+
+      <section id="youtube-panel" class="workflow-panel active">
+        <div class="form-grid">
+          <label class="field full">
+            <span>YouTube URL</span>
+            <input id="youtube-url" type="url" placeholder="https://www.youtube.com/watch?v=..." autocomplete="off" />
+          </label>
+
+          <label class="field full">
+            <span>Output folder</span>
+            <div class="picker-row">
+              <input id="youtube-output" type="text" placeholder="Choose where files should be saved" />
+              <button id="pick-youtube-output" type="button" class="secondary">Browse</button>
+            </div>
+          </label>
+
+          <label class="field">
+            <span>Task preset</span>
+            <select id="youtube-preset">
+              <option value="fallback">Transcript: captions, then Whisper</option>
+              <option value="media_transcript">Download media + transcript</option>
+              <option value="transcript_only">Transcript only</option>
+              <option value="media_only">Download media only</option>
+              <option value="captions_only">YouTube captions only</option>
+              <option value="whisper_only">Whisper only</option>
+              <option value="both">Captions + Whisper</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>Media action</span>
+            <select id="youtube-media-action">
+              <option value="audio">Download audio only</option>
+              <option value="video">Download video</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>Transcript source</span>
+            <select id="youtube-transcript-source">
+              <option value="captions_fallback">Captions if available, otherwise Whisper</option>
+              <option value="captions_only">YouTube captions only</option>
+              <option value="whisper_only">Whisper locally only</option>
+              <option value="both">Both captions and Whisper</option>
+              <option value="none">No transcript, media only</option>
+            </select>
+          </label>
+
+          <label class="checkbox-field">
+            <input id="youtube-keep-media" type="checkbox" />
+            <span>Keep downloaded media after transcription</span>
+          </label>
+        </div>
+      </section>
+
+      <section id="local-panel" class="workflow-panel">
+        <div class="form-grid">
+          <label class="field full">
+            <span>Local media file</span>
+            <div class="picker-row">
+              <input id="local-input" type="text" placeholder="Choose MP4, M4A, MP3, WAV, or another media file" />
+              <button id="pick-local-input" type="button" class="secondary">Browse</button>
+            </div>
+          </label>
+
+          <label class="field full">
+            <span>Output folder</span>
+            <div class="picker-row">
+              <input id="local-output" type="text" placeholder="Choose where files should be saved" />
+              <button id="pick-local-output" type="button" class="secondary">Browse</button>
+            </div>
+          </label>
+
+          <label class="field">
+            <span>Local action</span>
+            <select id="local-mode">
+              <option value="convert_transcribe">Convert + transcribe</option>
+              <option value="convert_only">Convert to WAV only</option>
+              <option value="transcribe_only">Transcribe WAV only</option>
+            </select>
+          </label>
+        </div>
+      </section>
+
+      <section class="shared-settings">
+        <label class="field full">
+          <span>Whisper model</span>
+          <select id="model-select"></select>
+        </label>
+
+        <label class="field compact">
+          <span>Subtitle max length</span>
+          <input id="max-len" type="number" min="0" step="1" value="80" />
+        </label>
+
+        <label class="field full prompt-field">
+          <span>Optional Whisper prompt</span>
+          <textarea id="whisper-prompt" rows="4" placeholder="Biology vocabulary, lecture/lab context, names, or technical terms"></textarea>
+        </label>
+      </section>
+
+      <section class="action-row">
+        <button id="start-job" type="button" class="primary">Start</button>
+        <button id="clear-log" type="button" class="secondary">Clear Log</button>
+        <button id="reveal-output" type="button" class="secondary" disabled>Reveal Output Folder</button>
+        <span id="job-status" class="job-status">Idle</span>
+      </section>
+
+      <section class="work-area">
+        <div class="steps">
+          <h2>Progress</h2>
+          <ol id="progress-list"></ol>
+        </div>
+        <div class="outputs">
+          <h2>Outputs</h2>
+          <ul id="output-list"></ul>
+        </div>
+      </section>
+
+      <section class="log-panel">
+        <div class="log-header">
+          <h2>Command Log</h2>
+          <span>stdout, stderr, commands, and errors</span>
+        </div>
+        <pre id="log-output"></pre>
+      </section>
     </main>
   </body>
 </html>

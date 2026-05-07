@@ -16,6 +16,13 @@ src-tauri/bundle/
 outputs/
 downloads/
 transcripts/
+*.youtube-captions.vtt
+*.youtube-captions.srt
+*.youtube-captions.txt
+*.whisper.srt
+*.whisper.txt
+*.whisper.json
+*.whisper.jsonl
 *.mp4
 *.m4v
 *.mov
@@ -26,10 +33,6 @@ transcripts/
 *.aac
 *.flac
 *.ogg
-*.vtt
-*.srt
-*.txt
-*.jsonl
 
 # Temporary audio and processing files
 *.wav
