@@ -1,0 +1,66 @@
+# Dependencies
+node_modules/
+
+# Frontend build output
+dist/
+
+# Rust build output
+src-tauri/target/
+target/
+
+# Tauri generated assets and bundles
+src-tauri/gen/
+src-tauri/bundle/
+
+# Generated media and transcript outputs
+outputs/
+downloads/
+transcripts/
+*.mp4
+*.m4v
+*.mov
+*.mkv
+*.webm
+*.mp3
+*.m4a
+*.aac
+*.flac
+*.ogg
+*.vtt
+*.srt
+*.txt
+*.jsonl
+
+# Temporary audio and processing files
+*.wav
+tmp/
+temp/
+*.tmp
+*.part
+*.ytdl
+*.frag
+*.frag.urls
+
+# Local config and environment files
+.env
+.env.*
+*.local
+config.local.json
+settings.local.json
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+
+# Editor
+.vscode/
+.idea/
