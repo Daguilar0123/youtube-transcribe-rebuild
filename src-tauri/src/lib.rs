@@ -657,9 +657,7 @@ fn run_youtube_job(app: AppHandle, request: YoutubeJobRequest) -> Result<JobResu
     let yt_dlp = tools
         .yt_dlp
         .ok_or_else(|| "yt-dlp was not found".to_string())?;
-    let ffmpeg = tools
-        .ffmpeg
-        .ok_or_else(|| "ffmpeg was not found".to_string())?;
+    let ffmpeg = tools.ffmpeg;
     let whisper_cli = tools.whisper_cli;
     let temp_dir = unique_temp_dir(&output_dir)?;
     let mut outputs = Vec::new();
@@ -682,6 +680,19 @@ fn run_youtube_job(app: AppHandle, request: YoutubeJobRequest) -> Result<JobResu
                 .iter()
                 .map(|p| p.to_string_lossy().to_string()),
         );
+        if request.transcript_source == "captions_only" && caption_outputs.is_empty() {
+            let cleaned = clean_paths(&app, &cleanup_candidates);
+            emit(
+                &app,
+                "error",
+                "captions",
+                "No YouTube captions were available for this URL",
+            );
+            return Err(format!(
+                "No YouTube captions were available. Cleaned {} temporary item(s).",
+                cleaned.len()
+            ));
+        }
     }
 
     let media_only = request.transcript_source == "none";
@@ -714,6 +725,7 @@ fn run_youtube_job(app: AppHandle, request: YoutubeJobRequest) -> Result<JobResu
 
         if whisper_requested {
             let whisper_cli = whisper_cli.ok_or_else(|| "whisper-cli was not found".to_string())?;
+            let ffmpeg = ffmpeg.ok_or_else(|| "ffmpeg was not found".to_string())?;
             let model_path = require_path(request.model_path, "Whisper model")?;
             let wav = temp_dir.join(format!("{}.whisper-input.wav", base));
             convert_to_wav(&app, &ffmpeg, &media, &wav)?;
