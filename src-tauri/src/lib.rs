@@ -318,6 +318,10 @@ fn shell_quote(value: &str) -> String {
     }
 }
 
+fn should_download_media(media_only: bool, keep_media: bool, whisper_requested: bool) -> bool {
+    media_only || keep_media || whisper_requested
+}
+
 fn command_output(
     program: &Path,
     args: &[String],
@@ -480,12 +484,19 @@ fn download_media(
         .to_string();
     let format_attempts = if media_action == "video" {
         vec![
+            "bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a][acodec^=mp4a]/b[ext=mp4][vcodec^=avc1][acodec^=mp4a]",
+            "bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b[ext=mp4][vcodec^=avc1]",
             "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
             "bv*+ba/b",
             "best",
         ]
     } else {
-        vec!["ba[ext=m4a]/ba/b", "ba/b", "best"]
+        vec![
+            "ba[ext=m4a][acodec^=mp4a]/ba[ext=m4a]/ba[acodec^=mp4a]/ba/b",
+            "ba[ext=m4a]/ba/b",
+            "ba/b",
+            "best",
+        ]
     };
 
     let mut last_error = None;
@@ -501,27 +512,37 @@ fn download_media(
 
         let mut args = vec![
             "--no-playlist".to_string(),
+            "--no-keep-video".to_string(),
             "-f".to_string(),
             format.to_string(),
         ];
 
-        if let Some(ffmpeg) = ffmpeg {
+        if media_action == "video" {
+            if let Some(ffmpeg) = ffmpeg {
+                args.push("--ffmpeg-location".to_string());
+                args.push(ffmpeg.to_string_lossy().to_string());
+                args.push("--merge-output-format".to_string());
+                args.push("mp4".to_string());
+            }
+        } else if let Some(ffmpeg) = ffmpeg {
             args.push("--ffmpeg-location".to_string());
             args.push(ffmpeg.to_string_lossy().to_string());
-            args.push("--merge-output-format".to_string());
-            args.push("mp4".to_string());
         }
 
         args.extend(["-o".to_string(), outtmpl.clone(), url.to_string()]);
 
         match run_command(app, "download", yt_dlp, &args, Some(output_dir)) {
             Ok(()) => {
-                return media_files(output_dir)
+                let artifacts = yt_dlp_format_artifacts(output_dir, base).unwrap_or_default();
+                let _ = clean_paths(app, &artifacts);
+                return downloaded_media_files(output_dir, base)
                     .map(|files| newest_first(files).collect())
                     .filter(|files: &Vec<PathBuf>| !files.is_empty())
                     .ok_or_else(|| "yt-dlp finished but no media file was found".to_string());
             }
             Err(error) => {
+                let artifacts = yt_dlp_format_artifacts(output_dir, base).unwrap_or_default();
+                let _ = clean_paths(app, &artifacts);
                 last_error = Some(error);
             }
         }
@@ -531,7 +552,9 @@ fn download_media(
         return Err(error);
     }
 
-    media_files(output_dir)
+    let artifacts = yt_dlp_format_artifacts(output_dir, base).unwrap_or_default();
+    let _ = clean_paths(app, &artifacts);
+    downloaded_media_files(output_dir, base)
         .map(|files| newest_first(files).collect())
         .filter(|files: &Vec<PathBuf>| !files.is_empty())
         .ok_or_else(|| "yt-dlp finished but no media file was found".to_string())
@@ -655,6 +678,40 @@ fn media_files(dir: &Path) -> Option<Vec<PathBuf>> {
         })
         .collect::<Vec<_>>();
     Some(files)
+}
+
+fn downloaded_media_files(dir: &Path, base: &str) -> Option<Vec<PathBuf>> {
+    Some(
+        media_files(dir)?
+            .into_iter()
+            .filter(|path| media_file_matches_base(path, base))
+            .collect(),
+    )
+}
+
+fn yt_dlp_format_artifacts(dir: &Path, base: &str) -> Option<Vec<PathBuf>> {
+    Some(
+        media_files(dir)?
+            .into_iter()
+            .filter(|path| media_file_is_format_artifact(path, base))
+            .collect(),
+    )
+}
+
+fn media_file_matches_base(path: &Path, base: &str) -> bool {
+    path.file_stem()
+        .and_then(OsStr::to_str)
+        .map(|stem| stem == base)
+        .unwrap_or(false)
+}
+
+fn media_file_is_format_artifact(path: &Path, base: &str) -> bool {
+    path.file_stem()
+        .and_then(OsStr::to_str)
+        .and_then(|stem| stem.strip_prefix(base))
+        .and_then(|suffix| suffix.strip_prefix(".f"))
+        .map(|format_id| !format_id.is_empty() && format_id.chars().all(|c| c.is_ascii_digit()))
+        .unwrap_or(false)
 }
 
 fn newest_first(files: Vec<PathBuf>) -> impl Iterator<Item = PathBuf> {
@@ -814,7 +871,7 @@ fn run_youtube_job(app: AppHandle, request: YoutubeJobRequest) -> Result<JobResu
         _ => false,
     };
 
-    if media_only || whisper_requested {
+    if should_download_media(media_only, request.keep_media, whisper_requested) {
         let media_output_dir = if request.keep_media || media_only {
             output_dir.clone()
         } else {
@@ -938,6 +995,29 @@ fn run_local_job(app: AppHandle, request: LocalJobRequest) -> Result<JobResult, 
         outputs,
         cleaned: Vec::new(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn matches_finished_media_file_for_base() {
+        let path = Path::new("/tmp/Video.Title.mp4");
+        assert!(media_file_matches_base(path, "Video.Title"));
+    }
+
+    #[test]
+    fn rejects_yt_dlp_format_artifact_as_finished_media() {
+        let path = Path::new("/tmp/Video.Title.f234.mp4");
+        assert!(!media_file_matches_base(path, "Video.Title"));
+        assert!(media_file_is_format_artifact(path, "Video.Title"));
+    }
+
+    #[test]
+    fn downloads_media_when_user_keeps_media_after_captions() {
+        assert!(should_download_media(false, true, false));
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

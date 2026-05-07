@@ -170,6 +170,7 @@ function applyYoutubePreset() {
   } else if (preset === "media_transcript") {
     source.value = "captions_fallback";
     keepMedia.checked = true;
+    mediaAction.value = "video";
   } else if (preset === "transcript_only") {
     source.value = "captions_fallback";
     keepMedia.checked = false;
@@ -177,6 +178,7 @@ function applyYoutubePreset() {
   } else if (preset === "media_only") {
     source.value = "none";
     keepMedia.checked = true;
+    mediaAction.value = "video";
   } else if (preset === "captions_only") {
     source.value = "captions_only";
     keepMedia.checked = false;
