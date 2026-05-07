@@ -223,7 +223,3 @@ Test these before treating the MVP as reliable:
 - Missing `whisper-cli` error message.
 - Missing or invalid model path error message.
 - Output folder reveal button.
-
-## GitHub
-
-This repository is ready to connect to GitHub. Local commits should be pushed when the remote is ready.
