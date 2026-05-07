@@ -118,6 +118,20 @@ The app currently expects these command-line tools to already be installed on th
 - `whisper-cli` from `whisper.cpp`
 - At least one compatible Whisper `.bin` model file
 
+YouTube changes often, so `yt-dlp` should be kept current when testing or debugging YouTube downloads:
+
+```bash
+yt-dlp --version
+brew update
+brew upgrade yt-dlp
+```
+
+The app was last tested locally with:
+
+```text
+yt-dlp 2026.03.17
+```
+
 The app scans common model folders, including:
 
 ```text
