@@ -39,6 +39,7 @@ struct JobResult {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct YoutubeJobRequest {
     url: String,
     output_dir: String,
@@ -51,6 +52,7 @@ struct YoutubeJobRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct LocalJobRequest {
     input_file: String,
     output_dir: String,
