@@ -373,7 +373,14 @@ fn download_captions(
         url.to_string(),
     ];
 
-    let _ = run_command(app, "captions", yt_dlp, &args, Some(temp_dir));
+    if let Err(error) = run_command(app, "captions", yt_dlp, &args, Some(temp_dir)) {
+        emit(
+            app,
+            "warn",
+            "captions",
+            format!("Caption download did not complete cleanly: {}", error),
+        );
+    }
     let caption_file = newest_file_with_exts(temp_dir, &["srt", "vtt"]);
     let Some(caption_file) = caption_file else {
         emit(app, "info", "captions", "No YouTube captions were saved");
@@ -451,24 +458,51 @@ fn download_media(
         .join(format!("{}.%(ext)s", base))
         .to_string_lossy()
         .to_string();
-    let format = if media_action == "video" {
-        "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+    let format_attempts = if media_action == "video" {
+        vec![
+            "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
+            "bv*+ba/b",
+            "best",
+        ]
     } else {
-        "bestaudio/best"
+        vec!["ba[ext=m4a]/ba/b", "ba/b", "best"]
     };
 
-    let args = vec![
-        "--no-playlist".to_string(),
-        "-f".to_string(),
-        format.to_string(),
-        "--merge-output-format".to_string(),
-        "mp4".to_string(),
-        "-o".to_string(),
-        outtmpl,
-        url.to_string(),
-    ];
+    let mut last_error = None;
+    for (index, format) in format_attempts.iter().enumerate() {
+        if index > 0 {
+            emit(
+                app,
+                "warn",
+                "download",
+                format!("Retrying download with fallback format: {}", format),
+            );
+        }
 
-    run_command(app, "download", yt_dlp, &args, Some(output_dir))?;
+        let args = vec![
+            "--no-playlist".to_string(),
+            "-f".to_string(),
+            format.to_string(),
+            "-o".to_string(),
+            outtmpl.clone(),
+            url.to_string(),
+        ];
+
+        match run_command(app, "download", yt_dlp, &args, Some(output_dir)) {
+            Ok(()) => {
+                return newest_media_file(output_dir)
+                    .ok_or_else(|| "yt-dlp finished but no media file was found".to_string());
+            }
+            Err(error) => {
+                last_error = Some(error);
+            }
+        }
+    }
+
+    if let Some(error) = last_error {
+        return Err(error);
+    }
+
     newest_media_file(output_dir)
         .ok_or_else(|| "yt-dlp finished but no media file was found".to_string())
 }
