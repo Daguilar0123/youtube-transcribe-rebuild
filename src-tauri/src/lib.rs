@@ -156,7 +156,7 @@ fn scan_models() -> Vec<String> {
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension() == Some(OsStr::new("bin")) && seen.insert(path.clone()) {
+                if is_plausible_whisper_model(&path) && seen.insert(path.clone()) {
                     models.push(path.to_string_lossy().to_string());
                 }
             }
@@ -165,6 +165,25 @@ fn scan_models() -> Vec<String> {
 
     models.sort_by(|a, b| model_rank(a).cmp(&model_rank(b)).then(a.cmp(b)));
     models
+}
+
+fn is_plausible_whisper_model(path: &Path) -> bool {
+    if path.extension() != Some(OsStr::new("bin")) {
+        return false;
+    }
+
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let lower = name.to_lowercase();
+
+    if !lower.starts_with("ggml-") || lower.contains("for-tests") || lower.contains("silero") {
+        return false;
+    }
+
+    path.metadata()
+        .map(|metadata| metadata.len() >= 10 * 1024 * 1024)
+        .unwrap_or(false)
 }
 
 fn model_rank(path: &str) -> u8 {
@@ -448,11 +467,12 @@ fn captions_to_txt(path: &Path) -> Result<String, String> {
 fn download_media(
     app: &AppHandle,
     yt_dlp: &Path,
+    ffmpeg: Option<&Path>,
     url: &str,
     output_dir: &Path,
     base: &str,
     media_action: &str,
-) -> Result<PathBuf, String> {
+) -> Result<Vec<PathBuf>, String> {
     emit(app, "stage", "download", "Downloading YouTube media");
     let outtmpl = output_dir
         .join(format!("{}.%(ext)s", base))
@@ -479,18 +499,26 @@ fn download_media(
             );
         }
 
-        let args = vec![
+        let mut args = vec![
             "--no-playlist".to_string(),
             "-f".to_string(),
             format.to_string(),
-            "-o".to_string(),
-            outtmpl.clone(),
-            url.to_string(),
         ];
+
+        if let Some(ffmpeg) = ffmpeg {
+            args.push("--ffmpeg-location".to_string());
+            args.push(ffmpeg.to_string_lossy().to_string());
+            args.push("--merge-output-format".to_string());
+            args.push("mp4".to_string());
+        }
+
+        args.extend(["-o".to_string(), outtmpl.clone(), url.to_string()]);
 
         match run_command(app, "download", yt_dlp, &args, Some(output_dir)) {
             Ok(()) => {
-                return newest_media_file(output_dir)
+                return media_files(output_dir)
+                    .map(|files| newest_first(files).collect())
+                    .filter(|files: &Vec<PathBuf>| !files.is_empty())
                     .ok_or_else(|| "yt-dlp finished but no media file was found".to_string());
             }
             Err(error) => {
@@ -503,7 +531,9 @@ fn download_media(
         return Err(error);
     }
 
-    newest_media_file(output_dir)
+    media_files(output_dir)
+        .map(|files| newest_first(files).collect())
+        .filter(|files: &Vec<PathBuf>| !files.is_empty())
         .ok_or_else(|| "yt-dlp finished but no media file was found".to_string())
 }
 
@@ -603,13 +633,59 @@ fn newest_file_with_exts(dir: &Path, extensions: &[&str]) -> Option<PathBuf> {
         .max_by_key(|path| path.metadata().and_then(|m| m.modified()).ok())
 }
 
-fn newest_media_file(dir: &Path) -> Option<PathBuf> {
-    newest_file_with_exts(
-        dir,
-        &[
-            "mp4", "m4a", "mp3", "webm", "mkv", "mov", "aac", "opus", "ogg",
-        ],
-    )
+fn media_files(dir: &Path) -> Option<Vec<PathBuf>> {
+    let extensions = [
+        "mp4", "m4a", "mp3", "webm", "mkv", "mov", "aac", "opus", "ogg",
+    ];
+    let files = fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|ext| {
+                        extensions
+                            .iter()
+                            .any(|wanted| ext.eq_ignore_ascii_case(wanted))
+                    })
+                    .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+    Some(files)
+}
+
+fn newest_first(files: Vec<PathBuf>) -> impl Iterator<Item = PathBuf> {
+    let mut files = files;
+    files.sort_by_key(|path| path.metadata().and_then(|m| m.modified()).ok());
+    files.reverse();
+    files.into_iter()
+}
+
+fn find_audio_media(ffmpeg: &Path, files: &[PathBuf]) -> Option<PathBuf> {
+    files
+        .iter()
+        .find(|path| media_has_audio(ffmpeg, path))
+        .cloned()
+}
+
+fn media_has_audio(ffmpeg: &Path, path: &Path) -> bool {
+    let args = vec![
+        "-hide_banner".to_string(),
+        "-i".to_string(),
+        path.to_string_lossy().to_string(),
+    ];
+
+    Command::new(ffmpeg)
+        .args(args)
+        .output()
+        .map(|output| {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            stderr.contains("Audio:")
+        })
+        .unwrap_or(false)
 }
 
 fn require_path(value: Option<String>, label: &str) -> Result<PathBuf, String> {
@@ -744,9 +820,10 @@ fn run_youtube_job(app: AppHandle, request: YoutubeJobRequest) -> Result<JobResu
         } else {
             temp_dir.clone()
         };
-        let media = download_media(
+        let downloaded_media = download_media(
             &app,
             &yt_dlp,
+            ffmpeg.as_deref(),
             &request.url,
             &media_output_dir,
             &base,
@@ -754,15 +831,22 @@ fn run_youtube_job(app: AppHandle, request: YoutubeJobRequest) -> Result<JobResu
         )?;
 
         if request.keep_media || media_only {
-            outputs.push(media.to_string_lossy().to_string());
+            outputs.extend(
+                downloaded_media
+                    .iter()
+                    .map(|path| path.to_string_lossy().to_string()),
+            );
         } else {
-            cleanup_candidates.push(media.clone());
+            cleanup_candidates.extend(downloaded_media.iter().cloned());
         }
 
         if whisper_requested {
             let whisper_cli = whisper_cli.ok_or_else(|| "whisper-cli was not found".to_string())?;
             let ffmpeg = ffmpeg.ok_or_else(|| "ffmpeg was not found".to_string())?;
             let model_path = require_path(request.model_path, "Whisper model")?;
+            let media = find_audio_media(&ffmpeg, &downloaded_media).ok_or_else(|| {
+                "Downloaded media did not contain an audio stream for Whisper".to_string()
+            })?;
             let wav = temp_dir.join(format!("{}.whisper-input.wav", base));
             convert_to_wav(&app, &ffmpeg, &media, &wav)?;
             cleanup_candidates.push(wav.clone());
