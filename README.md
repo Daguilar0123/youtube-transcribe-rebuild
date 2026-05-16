@@ -19,18 +19,21 @@ It can:
 - Accept a YouTube URL.
 - Download YouTube video or audio with `yt-dlp`.
 - Save existing YouTube captions when available.
+- Save the video description and full metadata as sidecar files, and embed metadata into downloaded media.
 - Use `ffmpeg` to extract or convert audio to WAV.
 - Run `whisper.cpp` locally to create transcripts.
+- Merge a Whisper transcript with YouTube captions into a single hybrid transcript that combines Whisper's prose with YouTube's proper-noun coverage.
 - Generate TXT and SRT output files.
 - Show progress, commands, stdout, stderr, and errors in the app window.
 - Reveal the output folder when the job is done.
 
 ## Current MVP Features
 
-The current MVP includes two main workflows:
+The current MVP includes three main workflows:
 
 - YouTube URL workflow, which is the primary workflow.
 - Local Media workflow, for files already on the computer.
+- Merge Transcripts workflow, for combining two existing transcript files into a hybrid output.
 
 It currently supports:
 
@@ -51,6 +54,11 @@ video-title.youtube-captions.txt
 video-title.youtube-captions.srt
 video-title.whisper.txt
 video-title.whisper.srt
+video-title.hybrid.txt
+video-title.hybrid.srt
+video-title.hybrid.flagged.txt
+video-title.description
+video-title.info.json
 ```
 
 ## YouTube Workflow Modes
@@ -90,6 +98,31 @@ The app ignores YouTube captions and forces local transcription through `whisper
 ### Captions + Whisper
 
 The app saves both YouTube captions and Whisper output so they can be compared.
+
+### Hybrid Transcript
+
+The app saves YouTube captions, runs Whisper locally, then merges the two into a single corrected transcript that uses Whisper's clean prose as the base and pulls proper nouns (names, places, organizations) from the YouTube captions.
+
+The merge uses Needleman-Wunsch alignment between the two streams and replaces a Whisper token with the YouTube token when:
+
+- The YouTube token is not a stopword, not a number, and has at least three characters, **and**
+- The edit distance between the two tokens is greater than one, **or** the YouTube token appears in the video's `.info.json` metadata (title, description, channel, uploader).
+
+Runs of three or more consecutive Whisper-only tokens with aligned context before them are flagged as potential hallucinations in a sidecar `.hybrid.flagged.txt` file for manual review.
+
+If YouTube captions are not available for the video, the mode falls back to Whisper-only with a clear status message — no merge is produced.
+
+See [docs/hybrid-transcript-feature.md](docs/hybrid-transcript-feature.md) for the full design.
+
+## Merge Transcripts Workflow
+
+The Merge Transcripts tab takes two existing transcript files and produces a hybrid output without re-downloading or re-running Whisper. It expects:
+
+- A Whisper `.srt` file (required).
+- A YouTube captions `.srt` file (required).
+- A video `.info.json` file (optional, but improves proper-noun detection).
+
+The merge uses the same algorithm as the YouTube Hybrid mode.
 
 ## Local Media Workflow Modes
 
@@ -151,7 +184,7 @@ ggml-large.bin
 From the project folder:
 
 ```bash
-cd /Users/danielaguilar/Developer/youtube-transcribe-rebuild
+cd path/to/youtube-transcribe-rebuild
 npm install
 npm run tauri dev
 ```
@@ -175,31 +208,27 @@ src-tauri/target/release/bundle/dmg/
 
 ## Open The Built App Without Installing
 
-After building, the app can be opened directly without dragging it into `/Applications`.
+After building, the app can be opened directly without dragging it into `/Applications`. Paths below are relative to the repository root.
 
 Use Finder to open:
 
 ```text
-/Users/danielaguilar/Developer/youtube-transcribe-rebuild/src-tauri/target/release/bundle/macos/YouTube Transcribe Rebuild.app
+src-tauri/target/release/bundle/macos/YouTube Transcribe Rebuild.app
 ```
 
-Or from Terminal:
+Or from Terminal, run from the repository root:
 
 ```bash
-open "/Users/danielaguilar/Developer/youtube-transcribe-rebuild/src-tauri/target/release/bundle/macos/YouTube Transcribe Rebuild.app"
+open "src-tauri/target/release/bundle/macos/YouTube Transcribe Rebuild.app"
 ```
 
 The DMG is also available at:
 
 ```text
-/Users/danielaguilar/Developer/youtube-transcribe-rebuild/src-tauri/target/release/bundle/dmg/YouTube Transcribe Rebuild_0.1.0_x64.dmg
+src-tauri/target/release/bundle/dmg/YouTube Transcribe Rebuild_0.1.0_aarch64.dmg
 ```
 
-## Known Issue: x64 Build
-
-The current build is `x64` because the installed Rust toolchain is running under x86_64 emulation.
-
-For best performance on Apple Silicon, this should be fixed later by installing native Apple Silicon Rust and rebuilding the app as arm64 or universal.
+The exact DMG filename depends on the host architecture (`aarch64` for Apple Silicon, `x64` for Intel-based Rust toolchains).
 
 ## Next Testing Checklist
 
@@ -211,6 +240,10 @@ Test these before treating the MVP as reliable:
 - YouTube captions only mode when captions do not exist.
 - Whisper only mode, even when captions exist.
 - Captions + Whisper mode for comparison.
+- Hybrid Transcript mode on a video with captions, confirming `.hybrid.{srt,txt}` and metadata sidecars are saved.
+- Hybrid Transcript mode on a video without captions, confirming clean fallback to Whisper-only.
+- Merge Transcripts tab with two existing SRT files and no `.info.json`.
+- Merge Transcripts tab with two existing SRT files plus an `.info.json`, confirming extra proper-noun replacements.
 - Download video only.
 - Download audio only.
 - Transcript only with temporary media cleanup.

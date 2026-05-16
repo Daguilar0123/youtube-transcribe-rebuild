@@ -34,8 +34,10 @@ const $ = <T extends HTMLElement>(selector: string): T => {
 
 const youtubeTab = $("#youtube-tab");
 const localTab = $("#local-tab");
+const mergeTab = $("#merge-tab");
 const youtubePanel = $("#youtube-panel");
 const localPanel = $("#local-panel");
+const mergePanel = $("#merge-panel");
 const environmentStatus = $("#environment-status");
 const modelSelect = $("#model-select") as HTMLSelectElement;
 const logOutput = $("#log-output");
@@ -45,7 +47,7 @@ const jobStatus = $("#job-status");
 const revealOutputButton = $("#reveal-output") as HTMLButtonElement;
 const startButton = $("#start-job") as HTMLButtonElement;
 
-let activeMode: "youtube" | "local" = "youtube";
+let activeMode: "youtube" | "local" | "merge" = "youtube";
 let activeOutputFolder = "";
 let running = false;
 
@@ -61,12 +63,14 @@ function textarea(selector: string): HTMLTextAreaElement {
   return $(selector) as HTMLTextAreaElement;
 }
 
-function setActiveMode(mode: "youtube" | "local") {
+function setActiveMode(mode: "youtube" | "local" | "merge") {
   activeMode = mode;
   youtubeTab.classList.toggle("active", mode === "youtube");
   localTab.classList.toggle("active", mode === "local");
+  mergeTab.classList.toggle("active", mode === "merge");
   youtubePanel.classList.toggle("active", mode === "youtube");
   localPanel.classList.toggle("active", mode === "local");
+  mergePanel.classList.toggle("active", mode === "merge");
 }
 
 function appendLog(event: JobEvent) {
@@ -157,6 +161,14 @@ async function pickLocalFile() {
   if (typeof selected === "string") input("#local-input").value = selected;
 }
 
+async function pickFileInto(target: HTMLInputElement, filters: { name: string; extensions: string[] }[]) {
+  const selected = await open({
+    multiple: false,
+    filters: [...filters, { name: "All Files", extensions: ["*"] }],
+  });
+  if (typeof selected === "string") target.value = selected;
+}
+
 function applyYoutubePreset() {
   const preset = select("#youtube-preset").value;
   const source = select("#youtube-transcript-source");
@@ -165,6 +177,10 @@ function applyYoutubePreset() {
 
   if (preset === "fallback") {
     source.value = "captions_fallback";
+    keepMedia.checked = false;
+    mediaAction.value = "audio";
+  } else if (preset === "hybrid") {
+    source.value = "hybrid";
     keepMedia.checked = false;
     mediaAction.value = "audio";
   } else if (preset === "media_transcript") {
@@ -237,6 +253,20 @@ async function runLocalJob() {
   return invoke<JobResult>("run_local_job", { request });
 }
 
+async function runMergeJob() {
+  activeOutputFolder = requireValue("#merge-output", "Output folder");
+  const infoJson = input("#merge-info-json").value.trim();
+  const outputBase = input("#merge-base").value.trim();
+  const request = {
+    whisperSrt: requireValue("#merge-whisper-srt", "Whisper SRT"),
+    youtubeSrt: requireValue("#merge-youtube-srt", "YouTube captions SRT"),
+    infoJson: infoJson || null,
+    outputDir: activeOutputFolder,
+    outputBase: outputBase || null,
+  };
+  return invoke<JobResult>("run_hybrid_merge_job", { request });
+}
+
 async function startJob() {
   if (running) return;
   clearRunState();
@@ -244,7 +274,12 @@ async function startJob() {
   jobStatus.textContent = "Running";
 
   try {
-    const result = activeMode === "youtube" ? await runYoutubeJob() : await runLocalJob();
+    const result =
+      activeMode === "youtube"
+        ? await runYoutubeJob()
+        : activeMode === "local"
+        ? await runLocalJob()
+        : await runMergeJob();
     renderOutputs(result.outputs);
     revealOutputButton.disabled = !activeOutputFolder;
     jobStatus.textContent = `Complete: ${result.outputs.length} output${result.outputs.length === 1 ? "" : "s"}`;
@@ -263,10 +298,21 @@ window.addEventListener("DOMContentLoaded", async () => {
 
   youtubeTab.addEventListener("click", () => setActiveMode("youtube"));
   localTab.addEventListener("click", () => setActiveMode("local"));
+  mergeTab.addEventListener("click", () => setActiveMode("merge"));
   $("#refresh-env").addEventListener("click", refreshEnvironment);
   $("#pick-youtube-output").addEventListener("click", () => pickDirectory(input("#youtube-output")));
   $("#pick-local-output").addEventListener("click", () => pickDirectory(input("#local-output")));
   $("#pick-local-input").addEventListener("click", pickLocalFile);
+  $("#pick-merge-output").addEventListener("click", () => pickDirectory(input("#merge-output")));
+  $("#pick-merge-whisper").addEventListener("click", () =>
+    pickFileInto(input("#merge-whisper-srt"), [{ name: "SRT", extensions: ["srt"] }])
+  );
+  $("#pick-merge-youtube").addEventListener("click", () =>
+    pickFileInto(input("#merge-youtube-srt"), [{ name: "SRT", extensions: ["srt"] }])
+  );
+  $("#pick-merge-info").addEventListener("click", () =>
+    pickFileInto(input("#merge-info-json"), [{ name: "JSON", extensions: ["json"] }])
+  );
   $("#youtube-preset").addEventListener("change", applyYoutubePreset);
   $("#clear-log").addEventListener("click", clearRunState);
   startButton.addEventListener("click", startJob);

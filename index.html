@@ -22,6 +22,7 @@
       <section class="tabs" role="tablist" aria-label="Input mode">
         <button id="youtube-tab" class="tab active" type="button">YouTube URL</button>
         <button id="local-tab" class="tab" type="button">Local Media</button>
+        <button id="merge-tab" class="tab" type="button">Merge Transcripts</button>
       </section>
 
       <section id="youtube-panel" class="workflow-panel active">
@@ -43,6 +44,7 @@
             <span>Task preset</span>
             <select id="youtube-preset">
               <option value="fallback">Transcript: captions, then Whisper</option>
+              <option value="hybrid">Hybrid transcript (best of both)</option>
               <option value="media_transcript">Download media + transcript</option>
               <option value="transcript_only">Transcript only</option>
               <option value="media_only">Download media only</option>
@@ -64,6 +66,7 @@
             <span>Transcript source</span>
             <select id="youtube-transcript-source">
               <option value="captions_fallback">Captions if available, otherwise Whisper</option>
+              <option value="hybrid">Hybrid: Whisper + YouTube proper nouns</option>
               <option value="captions_only">YouTube captions only</option>
               <option value="whisper_only">Whisper locally only</option>
               <option value="both">Both captions and Whisper</option>
@@ -74,6 +77,50 @@
           <label class="checkbox-field">
             <input id="youtube-keep-media" type="checkbox" />
             <span>Keep downloaded media after transcription</span>
+          </label>
+        </div>
+      </section>
+
+      <section id="merge-panel" class="workflow-panel">
+        <p class="panel-hint">
+          Already have a Whisper SRT and a YouTube captions SRT? Merge them locally — no download, no Whisper re-run. The optional <code>.info.json</code> sharpens proper-noun detection using the video's title, description, and channel name.
+        </p>
+        <div class="form-grid">
+          <label class="field full">
+            <span>Whisper SRT</span>
+            <div class="picker-row">
+              <input id="merge-whisper-srt" type="text" placeholder="Choose the .whisper.srt file" />
+              <button id="pick-merge-whisper" type="button" class="secondary">Browse</button>
+            </div>
+          </label>
+
+          <label class="field full">
+            <span>YouTube captions SRT</span>
+            <div class="picker-row">
+              <input id="merge-youtube-srt" type="text" placeholder="Choose the .youtube-captions.srt file" />
+              <button id="pick-merge-youtube" type="button" class="secondary">Browse</button>
+            </div>
+          </label>
+
+          <label class="field full">
+            <span>Video metadata (optional .info.json)</span>
+            <div class="picker-row">
+              <input id="merge-info-json" type="text" placeholder="Optional: improves proper-noun detection" />
+              <button id="pick-merge-info" type="button" class="secondary">Browse</button>
+            </div>
+          </label>
+
+          <label class="field full">
+            <span>Output folder</span>
+            <div class="picker-row">
+              <input id="merge-output" type="text" placeholder="Choose where the hybrid files should be saved" />
+              <button id="pick-merge-output" type="button" class="secondary">Browse</button>
+            </div>
+          </label>
+
+          <label class="field full">
+            <span>Output base name (optional)</span>
+            <input id="merge-base" type="text" placeholder="Defaults to the Whisper file's name" />
           </label>
         </div>
       </section>

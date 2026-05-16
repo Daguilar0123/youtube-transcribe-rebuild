@@ -63,6 +63,10 @@ pnpm-debug.log*
 .AppleDouble
 .LSOverride
 Icon?
+# The macOS `Icon?` rule above was accidentally swallowing our app icons
+# folder on case-insensitive filesystems. Explicitly keep these.
+!src-tauri/icons/
+!src-tauri/icons/**
 
 # Editor
 .vscode/

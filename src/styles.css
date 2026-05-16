@@ -168,6 +168,19 @@ h2 {
   display: block;
 }
 
+.panel-hint {
+  color: #4d544a;
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+
+.panel-hint code {
+  background: #eef0ea;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
 .form-grid,
 .shared-settings {
   display: grid;
