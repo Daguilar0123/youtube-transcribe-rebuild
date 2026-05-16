@@ -1,3 +1,5 @@
+mod hybrid;
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::env;
@@ -60,6 +62,16 @@ struct LocalJobRequest {
     model_path: Option<String>,
     whisper_prompt: Option<String>,
     max_len: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MergeJobRequest {
+    whisper_srt: String,
+    youtube_srt: String,
+    info_json: Option<String>,
+    output_dir: String,
+    output_base: Option<String>,
 }
 
 #[derive(Debug)]
@@ -363,6 +375,12 @@ fn get_youtube_title(yt_dlp: &Path, url: &str) -> String {
         .unwrap_or_else(|| "youtube-transcript".to_string())
 }
 
+struct CaptionDownload {
+    transcripts: Vec<PathBuf>,
+    metadata: Vec<PathBuf>,
+    srt_path: Option<PathBuf>,
+}
+
 fn download_captions(
     app: &AppHandle,
     yt_dlp: &Path,
@@ -370,7 +388,7 @@ fn download_captions(
     temp_dir: &Path,
     output_dir: &Path,
     base: &str,
-) -> Result<Vec<PathBuf>, String> {
+) -> Result<CaptionDownload, String> {
     emit(
         app,
         "stage",
@@ -385,6 +403,8 @@ fn download_captions(
         "--skip-download".to_string(),
         "--write-subs".to_string(),
         "--write-auto-subs".to_string(),
+        "--write-description".to_string(),
+        "--write-info-json".to_string(),
         "--sub-langs".to_string(),
         "en.*".to_string(),
         "--sub-format".to_string(),
@@ -404,10 +424,17 @@ fn download_captions(
             format!("Caption download did not complete cleanly: {}", error),
         );
     }
+
+    let metadata = collect_metadata_sidecars(app, temp_dir, "captions", output_dir, base);
+
     let caption_file = newest_file_with_exts(temp_dir, &["srt", "vtt"]);
     let Some(caption_file) = caption_file else {
         emit(app, "info", "captions", "No YouTube captions were saved");
-        return Ok(Vec::new());
+        return Ok(CaptionDownload {
+            transcripts: Vec::new(),
+            metadata,
+            srt_path: None,
+        });
     };
 
     let srt_out = output_dir.join(format!("{}.youtube-captions.srt", base));
@@ -424,15 +451,96 @@ fn download_captions(
             "captions",
             "Saved YouTube captions as TXT and SRT",
         );
-        Ok(vec![srt_out, txt_out])
     } else {
         let txt = captions_to_txt(&caption_file)?;
         fs::write(&txt_out, txt).map_err(|e| format!("Could not save TXT captions: {}", e))?;
         fs::copy(&caption_file, &srt_out)
             .map_err(|e| format!("Could not save caption file: {}", e))?;
         emit(app, "stage", "captions", "Saved YouTube captions");
-        Ok(vec![srt_out, txt_out])
     }
+
+    Ok(CaptionDownload {
+        transcripts: vec![srt_out.clone(), txt_out],
+        metadata,
+        srt_path: Some(srt_out),
+    })
+}
+
+fn collect_metadata_sidecars(
+    app: &AppHandle,
+    source_dir: &Path,
+    source_stem: &str,
+    output_dir: &Path,
+    base: &str,
+) -> Vec<PathBuf> {
+    let mut collected = Vec::new();
+    for ext in ["description", "info.json"] {
+        let dst = output_dir.join(format!("{}.{}", base, ext));
+        if let Some(found) = find_sidecar(source_dir, source_stem, ext) {
+            if let Err(error) = move_or_copy(&found, &dst) {
+                emit(
+                    app,
+                    "warn",
+                    "metadata",
+                    format!("Could not save {}: {}", ext, error),
+                );
+                continue;
+            }
+        }
+        if dst.is_file() && !collected.contains(&dst) {
+            collected.push(dst);
+        }
+    }
+    if !collected.is_empty() {
+        let names: Vec<String> = collected
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .collect();
+        emit(
+            app,
+            "stage",
+            "metadata",
+            format!("Saved metadata sidecar(s): {}", names.join(", ")),
+        );
+    }
+    collected
+}
+
+fn find_sidecar(dir: &Path, stem: &str, ext: &str) -> Option<PathBuf> {
+    let direct = dir.join(format!("{}.{}", stem, ext));
+    if direct.is_file() {
+        return Some(direct);
+    }
+    fs::read_dir(dir).ok()?.flatten().find_map(|entry| {
+        let path = entry.path();
+        if !path.is_file() {
+            return None;
+        }
+        let name = path.file_name()?.to_str()?;
+        let suffix = format!(".{}", ext);
+        if name.starts_with(&format!("{}.", stem)) && name.ends_with(&suffix) {
+            Some(path)
+        } else {
+            None
+        }
+    })
+}
+
+fn move_or_copy(src: &Path, dst: &Path) -> Result<(), String> {
+    if src == dst {
+        return Ok(());
+    }
+    if dst.exists() {
+        let _ = fs::remove_file(dst);
+    }
+    if fs::rename(src, dst).is_ok() {
+        return Ok(());
+    }
+    fs::copy(src, dst)
+        .map(|_| ())
+        .map_err(|e| format!("Could not copy {} → {}: {}", src.display(), dst.display(), e))?;
+    let _ = fs::remove_file(src);
+    Ok(())
 }
 
 fn captions_to_txt(path: &Path) -> Result<String, String> {
@@ -513,6 +621,9 @@ fn download_media(
         let mut args = vec![
             "--no-playlist".to_string(),
             "--no-keep-video".to_string(),
+            "--write-description".to_string(),
+            "--write-info-json".to_string(),
+            "--embed-metadata".to_string(),
             "-f".to_string(),
             format.to_string(),
         ];
@@ -838,18 +949,36 @@ fn run_youtube_job(app: AppHandle, request: YoutubeJobRequest) -> Result<JobResu
 
     let captions_requested = matches!(
         request.transcript_source.as_str(),
-        "captions_fallback" | "captions_only" | "both"
+        "captions_fallback" | "captions_only" | "both" | "hybrid"
     );
-    let mut caption_outputs = Vec::new();
+    let mut youtube_srt_path: Option<PathBuf> = None;
+    let mut info_json_path: Option<PathBuf> = None;
+    let mut metadata_paths: Vec<PathBuf> = Vec::new();
+    let mut had_captions = false;
     if captions_requested {
-        caption_outputs =
+        let caption_download =
             download_captions(&app, &yt_dlp, &request.url, &temp_dir, &output_dir, &base)?;
+        had_captions = !caption_download.transcripts.is_empty();
         outputs.extend(
-            caption_outputs
+            caption_download
+                .transcripts
                 .iter()
                 .map(|p| p.to_string_lossy().to_string()),
         );
-        if request.transcript_source == "captions_only" && caption_outputs.is_empty() {
+        youtube_srt_path = caption_download.srt_path;
+        for sidecar in &caption_download.metadata {
+            outputs.push(sidecar.to_string_lossy().to_string());
+            if sidecar
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(|n| n.ends_with(".info.json"))
+                .unwrap_or(false)
+            {
+                info_json_path = Some(sidecar.clone());
+            }
+            metadata_paths.push(sidecar.clone());
+        }
+        if request.transcript_source == "captions_only" && !had_captions {
             let cleaned = clean_paths(&app, &cleanup_candidates);
             emit(
                 &app,
@@ -862,14 +991,24 @@ fn run_youtube_job(app: AppHandle, request: YoutubeJobRequest) -> Result<JobResu
                 cleaned.len()
             ));
         }
+        if request.transcript_source == "hybrid" && !had_captions {
+            emit(
+                &app,
+                "warn",
+                "hybrid",
+                "No YouTube captions found — falling back to Whisper-only; no merge will be produced",
+            );
+        }
     }
 
     let media_only = request.transcript_source == "none";
     let whisper_requested = match request.transcript_source.as_str() {
-        "whisper_only" | "both" => true,
-        "captions_fallback" => caption_outputs.is_empty(),
+        "whisper_only" | "both" | "hybrid" => true,
+        "captions_fallback" => !had_captions,
         _ => false,
     };
+
+    let mut whisper_srt_path: Option<PathBuf> = None;
 
     if should_download_media(media_only, request.keep_media, whisper_requested) {
         let media_output_dir = if request.keep_media || media_only {
@@ -886,6 +1025,30 @@ fn run_youtube_job(app: AppHandle, request: YoutubeJobRequest) -> Result<JobResu
             &base,
             &request.media_action,
         )?;
+
+        let media_metadata = collect_metadata_sidecars(
+            &app,
+            &media_output_dir,
+            &base,
+            &output_dir,
+            &base,
+        );
+        for sidecar in &media_metadata {
+            if metadata_paths.iter().any(|existing| existing == sidecar) {
+                continue;
+            }
+            outputs.push(sidecar.to_string_lossy().to_string());
+            if sidecar
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(|n| n.ends_with(".info.json"))
+                .unwrap_or(false)
+                && info_json_path.is_none()
+            {
+                info_json_path = Some(sidecar.clone());
+            }
+            metadata_paths.push(sidecar.clone());
+        }
 
         if request.keep_media || media_only {
             outputs.extend(
@@ -917,10 +1080,71 @@ fn run_youtube_job(app: AppHandle, request: YoutubeJobRequest) -> Result<JobResu
                 request.whisper_prompt.as_deref(),
                 request.max_len,
             )?;
+            for path in &whisper_outputs {
+                if path.extension().and_then(|s| s.to_str()) == Some("srt") {
+                    whisper_srt_path = Some(path.clone());
+                }
+            }
             outputs.extend(
                 whisper_outputs
                     .iter()
                     .map(|p| p.to_string_lossy().to_string()),
+            );
+        }
+    }
+
+    if request.transcript_source == "hybrid" {
+        if let (Some(whisper_srt), Some(yt_srt)) =
+            (whisper_srt_path.as_ref(), youtube_srt_path.as_ref())
+        {
+            emit(
+                &app,
+                "stage",
+                "hybrid",
+                "Merging Whisper prose with YouTube proper nouns",
+            );
+            let hybrid_txt = output_dir.join(format!("{}.hybrid.txt", base));
+            let hybrid_srt = output_dir.join(format!("{}.hybrid.srt", base));
+            let hybrid_flagged = output_dir.join(format!("{}.hybrid.flagged.txt", base));
+            match hybrid::build_hybrid(
+                whisper_srt,
+                yt_srt,
+                info_json_path.as_deref(),
+                &hybrid_txt,
+                &hybrid_srt,
+                &hybrid_flagged,
+            ) {
+                Ok(result) => {
+                    outputs.push(result.out_srt.to_string_lossy().to_string());
+                    outputs.push(result.out_txt.to_string_lossy().to_string());
+                    if let Some(flagged) = result.out_flagged {
+                        outputs.push(flagged.to_string_lossy().to_string());
+                    }
+                    emit(
+                        &app,
+                        "stage",
+                        "hybrid",
+                        format!(
+                            "Hybrid transcript ready: {} proper-noun replacement(s), {} flagged segment(s)",
+                            result.replacements, result.flagged_segments
+                        ),
+                    );
+                }
+                Err(error) => {
+                    emit(
+                        &app,
+                        "warn",
+                        "hybrid",
+                        format!("Could not build hybrid transcript: {}", error),
+                    );
+                }
+            }
+        } else if had_captions {
+            emit(
+                &app,
+                "warn",
+                "hybrid",
+                "Missing one of the source transcripts — skipping merge",
             );
         }
     }
@@ -997,6 +1221,102 @@ fn run_local_job(app: AppHandle, request: LocalJobRequest) -> Result<JobResult, 
     })
 }
 
+#[tauri::command]
+fn run_hybrid_merge_job(app: AppHandle, request: MergeJobRequest) -> Result<JobResult, String> {
+    let whisper_srt = PathBuf::from(request.whisper_srt.trim());
+    let youtube_srt = PathBuf::from(request.youtube_srt.trim());
+    let info_json = request
+        .info_json
+        .as_ref()
+        .map(|p| PathBuf::from(p.trim()))
+        .filter(|p| !p.as_os_str().is_empty());
+
+    if !whisper_srt.is_file() {
+        return Err(format!(
+            "Whisper SRT was not found: {}",
+            whisper_srt.to_string_lossy()
+        ));
+    }
+    if !youtube_srt.is_file() {
+        return Err(format!(
+            "YouTube captions SRT was not found: {}",
+            youtube_srt.to_string_lossy()
+        ));
+    }
+    if let Some(info) = info_json.as_ref() {
+        if !info.is_file() {
+            return Err(format!(
+                "info.json was not found: {}",
+                info.to_string_lossy()
+            ));
+        }
+    }
+
+    let output_dir = PathBuf::from(request.output_dir.trim());
+    fs::create_dir_all(&output_dir)
+        .map_err(|e| format!("Could not create output folder: {}", e))?;
+
+    let base_input = request
+        .output_base
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            let stem = whisper_srt
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("hybrid-transcript");
+            stem.strip_suffix(".whisper").unwrap_or(stem).to_string()
+        });
+    let base = sanitize(&base_input);
+    emit(&app, "stage", "setup", "Preparing hybrid merge");
+    emit(&app, "info", "setup", format!("Output prefix: {}", base));
+
+    let hybrid_txt = output_dir.join(format!("{}.hybrid.txt", base));
+    let hybrid_srt = output_dir.join(format!("{}.hybrid.srt", base));
+    let hybrid_flagged = output_dir.join(format!("{}.hybrid.flagged.txt", base));
+
+    emit(
+        &app,
+        "stage",
+        "hybrid",
+        "Merging Whisper prose with YouTube proper nouns",
+    );
+    let result = hybrid::build_hybrid(
+        &whisper_srt,
+        &youtube_srt,
+        info_json.as_deref(),
+        &hybrid_txt,
+        &hybrid_srt,
+        &hybrid_flagged,
+    )
+    .map_err(|e| format!("Hybrid merge failed: {}", e))?;
+
+    let mut outputs = vec![
+        result.out_srt.to_string_lossy().to_string(),
+        result.out_txt.to_string_lossy().to_string(),
+    ];
+    if let Some(flagged) = &result.out_flagged {
+        outputs.push(flagged.to_string_lossy().to_string());
+    }
+    emit(
+        &app,
+        "stage",
+        "hybrid",
+        format!(
+            "Hybrid transcript ready: {} proper-noun replacement(s), {} flagged segment(s)",
+            result.replacements, result.flagged_segments
+        ),
+    );
+
+    emit(&app, "stage", "done", "Job complete");
+    Ok(JobResult {
+        status: "complete".to_string(),
+        outputs,
+        cleaned: Vec::new(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1028,7 +1348,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             check_environment,
             run_youtube_job,
-            run_local_job
+            run_local_job,
+            run_hybrid_merge_job
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
