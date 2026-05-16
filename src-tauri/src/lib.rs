@@ -1,3 +1,31 @@
+// =============================================================================
+// lib.rs — the brains of the app.
+//
+// WHAT THIS FILE DOES (in plain English)
+// --------------------------------------
+// This is the Rust side of the YouTube Transcribe Rebuild app. The user
+// interface (HTML/CSS/TypeScript) lives in the `src/` folder; this file is
+// the engine that the UI talks to whenever the user clicks "Start".
+//
+// In a Tauri app, the UI is essentially a small web browser window, and Rust
+// runs underneath it doing the work that browsers can't do safely — running
+// command-line tools, reading and writing arbitrary files, etc. The UI sends
+// requests over a bridge ("invoke a command"), Rust handles them, and Rust
+// can also push live progress updates ("emit an event") back to the UI.
+//
+// The "commands" the UI can invoke are at the bottom of the file:
+//
+//   check_environment      — list which CLI tools are installed.
+//   run_youtube_job        — handle the YouTube URL tab.
+//   run_local_job          — handle the Local Media tab.
+//   run_hybrid_merge_job   — handle the Merge Transcripts tab.
+//
+// Everything else in this file is a helper used by those four commands:
+// tool detection, command spawning, file naming, cleanup, and so on.
+// The actual hybrid-merge math lives in its own file, `hybrid.rs`.
+// =============================================================================
+
+// Pull in the sibling hybrid.rs module that contains the transcript merger.
 mod hybrid;
 
 use serde::{Deserialize, Serialize};
@@ -13,13 +41,28 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 
+// -----------------------------------------------------------------------------
+// Data shapes — these are the structured messages the Rust side exchanges
+// with the UI (and a couple of internal-only helpers).
+//
+// `Serialize` types are what Rust sends *to* the UI. `Deserialize` types are
+// what the UI sends *to* Rust. The `#[serde(rename_all = "camelCase")]`
+// attribute means Rust uses snake_case names internally but converts them to
+// camelCase on the wire (because JavaScript expects camelCase).
+// -----------------------------------------------------------------------------
+
+/// One live progress update sent to the UI while a job is running. The UI
+/// shows these in the log panel and uses `stage` events to fill in the
+/// "Progress" list.
 #[derive(Debug, Clone, Serialize)]
 struct JobEvent {
-    level: String,
-    stage: String,
-    message: String,
+    level: String,    // e.g. "stage", "info", "warn", "error", "stdout", "stderr"
+    stage: String,    // which phase the event belongs to (download, ffmpeg, etc.)
+    message: String,  // free-form human-readable message
 }
 
+/// Reports whether a single command-line tool was found on the system, and
+/// where. Used to fill in the row of dependency badges at the top of the UI.
 #[derive(Debug, Serialize)]
 struct DependencyStatus {
     name: String,
@@ -27,12 +70,17 @@ struct DependencyStatus {
     path: Option<String>,
 }
 
+/// The full environment report sent back when the UI asks "what tools and
+/// Whisper models do you see on this machine?".
 #[derive(Debug, Serialize)]
 struct EnvironmentReport {
     dependencies: Vec<DependencyStatus>,
     models: Vec<String>,
 }
 
+/// The final summary the UI receives when a job finishes successfully:
+/// the list of output files (so it can show them and reveal the folder)
+/// and the list of temporary items that were cleaned up along the way.
 #[derive(Debug, Serialize)]
 struct JobResult {
     status: String,
@@ -40,30 +88,34 @@ struct JobResult {
     cleaned: Vec<String>,
 }
 
+/// The form fields the UI sends when the user runs a job from the
+/// YouTube URL tab. Mirrors the shape of the UI form.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct YoutubeJobRequest {
     url: String,
     output_dir: String,
-    media_action: String,
-    transcript_source: String,
+    media_action: String,       // "audio" or "video"
+    transcript_source: String,  // "captions_fallback", "hybrid", "whisper_only", etc.
     keep_media: bool,
     model_path: Option<String>,
     whisper_prompt: Option<String>,
     max_len: Option<u32>,
 }
 
+/// The form fields the UI sends from the Local Media tab.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LocalJobRequest {
     input_file: String,
     output_dir: String,
-    mode: String,
+    mode: String,               // "convert_transcribe", "convert_only", "transcribe_only"
     model_path: Option<String>,
     whisper_prompt: Option<String>,
     max_len: Option<u32>,
 }
 
+/// The form fields the UI sends from the Merge Transcripts tab.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct MergeJobRequest {
@@ -74,6 +126,8 @@ struct MergeJobRequest {
     output_base: Option<String>,
 }
 
+/// The set of CLI tool paths the app needs, in one place. Any tool that
+/// wasn't found is `None`.
 #[derive(Debug)]
 struct ToolPaths {
     yt_dlp: Option<PathBuf>,
@@ -81,6 +135,14 @@ struct ToolPaths {
     whisper_cli: Option<PathBuf>,
 }
 
+// -----------------------------------------------------------------------------
+// Logging / progress emit helper.
+// -----------------------------------------------------------------------------
+
+/// Sends one progress update from Rust to the UI. The UI is listening for
+/// "job-event" messages and routes them into the log panel and the
+/// "Progress" list. Errors during emit are silently swallowed — if the UI
+/// isn't listening, there's nothing reasonable to do about it here.
 fn emit(app: &AppHandle, level: &str, stage: &str, message: impl Into<String>) {
     let _ = app.emit(
         "job-event",
@@ -92,10 +154,20 @@ fn emit(app: &AppHandle, level: &str, stage: &str, message: impl Into<String>) {
     );
 }
 
+// -----------------------------------------------------------------------------
+// Tool discovery — finding yt-dlp, ffmpeg, whisper-cli, and Whisper models
+// without hardcoding paths.
+// -----------------------------------------------------------------------------
+
+/// Returns the user's home directory (e.g. /Users/yourname). Used as a base
+/// for looking up Whisper models and the whisper.cpp build folder.
 fn home_dir() -> Option<PathBuf> {
     env::var_os("HOME").map(PathBuf::from)
 }
 
+/// Builds the list of folders to search when looking for command-line tools.
+/// Starts with a few well-known Homebrew/system folders, then adds anything
+/// listed in the user's `PATH` environment variable.
 fn path_entries() -> Vec<PathBuf> {
     let mut entries = vec![
         PathBuf::from("/opt/homebrew/bin"),
@@ -115,6 +187,10 @@ fn path_entries() -> Vec<PathBuf> {
         .collect()
 }
 
+/// Looks for an executable file by name. First checks any `extra_paths`
+/// passed in (used for tools like whisper-cli that live in a known
+/// subfolder of the user's home directory), then walks every folder from
+/// `path_entries()`.
 fn find_executable(name: &str, extra_paths: &[PathBuf]) -> Option<PathBuf> {
     for path in extra_paths {
         if path.is_file() {
@@ -132,6 +208,9 @@ fn find_executable(name: &str, extra_paths: &[PathBuf]) -> Option<PathBuf> {
     None
 }
 
+/// Runs `find_executable` for each of the three CLI tools the app depends on
+/// and bundles the results into a single `ToolPaths` value. Called once per
+/// job so that fresh installs/uninstalls take effect immediately.
 fn detect_tools() -> ToolPaths {
     let home = home_dir();
     let whisper_candidates = home
@@ -151,6 +230,8 @@ fn detect_tools() -> ToolPaths {
     }
 }
 
+/// The two folders we'll scan for downloaded Whisper `.bin` models. Anyone
+/// who installs whisper.cpp via its README ends up with one of these.
 fn model_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(home) = home_dir() {
@@ -160,6 +241,9 @@ fn model_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+/// Lists every Whisper model `.bin` file found on disk, sorted with the
+/// "best" model first (large, then medium, then everything else). The UI
+/// populates its model dropdown from this list.
 fn scan_models() -> Vec<String> {
     let mut models = Vec::new();
     let mut seen = HashSet::new();
@@ -179,6 +263,9 @@ fn scan_models() -> Vec<String> {
     models
 }
 
+/// Cheap "does this look like a real Whisper model?" sanity check.
+/// Filters out test stubs, voice-activity models, and anything that's too
+/// small to actually be a Whisper checkpoint.
 fn is_plausible_whisper_model(path: &Path) -> bool {
     if path.extension() != Some(OsStr::new("bin")) {
         return false;
@@ -198,6 +285,9 @@ fn is_plausible_whisper_model(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Used to sort the model dropdown: large multilingual first, then medium,
+/// then anything else multilingual, then English-only models last. Lower
+/// numbers sort earlier.
 fn model_rank(path: &str) -> u8 {
     let name = path.to_lowercase();
     if name.contains("large") && !name.contains(".en") {
@@ -211,6 +301,13 @@ fn model_rank(path: &str) -> u8 {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Filename / path helpers.
+// -----------------------------------------------------------------------------
+
+/// Cleans up a string (usually a YouTube video title) so it can safely be
+/// used as a filename: letters, digits, spaces, dots, underscores and
+/// dashes are kept; everything else becomes an underscore.
 fn sanitize(name: &str) -> String {
     let cleaned: String = name
         .chars()
@@ -230,6 +327,9 @@ fn sanitize(name: &str) -> String {
     }
 }
 
+/// Creates a one-off temporary working folder inside the user's chosen
+/// output folder. The name includes the current timestamp in milliseconds
+/// so two jobs started back-to-back never collide.
 fn unique_temp_dir(output_dir: &Path) -> Result<PathBuf, String> {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -240,6 +340,17 @@ fn unique_temp_dir(output_dir: &Path) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+// -----------------------------------------------------------------------------
+// Command-spawning plumbing — running yt-dlp, ffmpeg, and whisper-cli, with
+// live output streaming back to the UI.
+// -----------------------------------------------------------------------------
+
+/// Runs a command-line tool, streaming both its normal output (stdout) and
+/// its error output (stderr) into the UI's log panel as the tool runs.
+///
+/// Returns `Ok(())` if the command exits successfully. Returns an `Err`
+/// string with the tool's last 20 lines of stderr if it fails — that tail
+/// is usually where the real error message is.
 fn run_command(
     app: &AppHandle,
     stage: &str,
@@ -247,6 +358,8 @@ fn run_command(
     args: &[String],
     working_dir: Option<&Path>,
 ) -> Result<(), String> {
+    // First, log the full command line so the user can see exactly what's
+    // running (useful for debugging and for trust).
     let command_line = format!(
         "{} {}",
         program.to_string_lossy(),
@@ -266,15 +379,21 @@ fn run_command(
         command.current_dir(dir);
     }
 
+    // Actually launch the program as a child process.
     let mut child = command
         .spawn()
         .map_err(|e| format!("Failed to start {}: {}", program.to_string_lossy(), e))?;
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
+    // `errors` is a rolling buffer of the most recent stderr lines, kept
+    // behind a mutex because two threads (this one and the stderr reader)
+    // touch it. If the command fails, we use it for the error message.
     let errors = Arc::new(Mutex::new(Vec::<String>::new()));
     let mut handles = Vec::new();
 
+    // Each stream gets its own thread so output appears live instead of
+    // appearing all at once when the command finishes.
     if let Some(stdout) = stdout {
         let app = app.clone();
         let stage = stage.to_string();
@@ -319,6 +438,9 @@ fn run_command(
     Ok(())
 }
 
+/// Wraps a command-line argument in quotes if it contains spaces or
+/// special characters. Used purely for *displaying* the command in the log
+/// panel — the actual command execution doesn't go through a shell.
 fn shell_quote(value: &str) -> String {
     if value
         .chars()
@@ -330,10 +452,17 @@ fn shell_quote(value: &str) -> String {
     }
 }
 
+/// Decides whether we need to fire up yt-dlp to download media. We do if:
+///  - the user wants media only,
+///  - the user wants to keep media alongside the transcript, OR
+///  - we need audio so Whisper can run.
 fn should_download_media(media_only: bool, keep_media: bool, whisper_requested: bool) -> bool {
     media_only || keep_media || whisper_requested
 }
 
+/// Like `run_command` but waits for the program to finish and returns its
+/// captured stdout as a string. Used for quick one-shot queries like
+/// "ask yt-dlp for this video's title" — no need to stream output for those.
 fn command_output(
     program: &Path,
     args: &[String],
@@ -353,6 +482,8 @@ fn command_output(
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// For the Local Media tab: derives the output-file prefix from the input
+/// file's name. (e.g. `lecture-04.mp4` -> `lecture-04`.)
 fn base_from_input(path: &Path) -> String {
     sanitize(
         path.file_stem()
@@ -361,6 +492,9 @@ fn base_from_input(path: &Path) -> String {
     )
 }
 
+/// Asks yt-dlp for the YouTube video's title and returns a filename-safe
+/// version of it. If anything goes wrong (no internet, deleted video, etc.)
+/// falls back to a generic "youtube-transcript" so the job can still run.
 fn get_youtube_title(yt_dlp: &Path, url: &str) -> String {
     let args = vec![
         "--no-playlist".to_string(),
@@ -375,12 +509,26 @@ fn get_youtube_title(yt_dlp: &Path, url: &str) -> String {
         .unwrap_or_else(|| "youtube-transcript".to_string())
 }
 
+// -----------------------------------------------------------------------------
+// YouTube captions — downloading them, converting them, saving them.
+// -----------------------------------------------------------------------------
+
+/// What the caption-download step returns: which transcript files it saved,
+/// which metadata sidecar files it saved alongside (description, info.json),
+/// and the path to the .srt file if one was produced (used by the hybrid
+/// merge later).
 struct CaptionDownload {
     transcripts: Vec<PathBuf>,
     metadata: Vec<PathBuf>,
     srt_path: Option<PathBuf>,
 }
 
+/// Asks yt-dlp for the video's existing English captions (auto-generated or
+/// human-written) plus the video's description and full metadata JSON.
+/// Saves all of it into the user's output folder with consistent names.
+///
+/// Returns a `CaptionDownload`. The transcript lists are empty if no
+/// captions were available; that's a normal outcome, not an error.
 fn download_captions(
     app: &AppHandle,
     yt_dlp: &Path,
@@ -395,10 +543,20 @@ fn download_captions(
         "captions",
         "Checking for existing YouTube captions",
     );
+    // yt-dlp puts everything in the temp folder first; we'll rename and move
+    // anything worth keeping into the user's output folder afterward.
     let outtmpl = temp_dir
         .join("captions.%(ext)s")
         .to_string_lossy()
         .to_string();
+    // What the flags mean:
+    //   --skip-download         don't download the video, just the captions
+    //   --write-subs            grab human-uploaded captions if present
+    //   --write-auto-subs       fall back to YouTube's auto-captions
+    //   --write-description     save the video's description as .description
+    //   --write-info-json       save full metadata as .info.json
+    //   --sub-langs en.*        any English variant (en, en-US, en-GB, ...)
+    //   --convert-subs srt      always normalize captions to .srt
     let args = vec![
         "--skip-download".to_string(),
         "--write-subs".to_string(),
@@ -466,6 +624,10 @@ fn download_captions(
     })
 }
 
+/// Finds any `.description` and `.info.json` files yt-dlp wrote (using
+/// whatever filename stem we asked it to use), then moves or copies them
+/// into the user's output folder with consistent `<base>.description` /
+/// `<base>.info.json` names. Returns the final paths so the UI can list them.
 fn collect_metadata_sidecars(
     app: &AppHandle,
     source_dir: &Path,
@@ -506,6 +668,9 @@ fn collect_metadata_sidecars(
     collected
 }
 
+/// Looks in `dir` for a file named exactly `<stem>.<ext>`. If that's not
+/// there, falls back to any file that starts with `<stem>.` and ends with
+/// `.<ext>` (yt-dlp sometimes inserts language suffixes).
 fn find_sidecar(dir: &Path, stem: &str, ext: &str) -> Option<PathBuf> {
     let direct = dir.join(format!("{}.{}", stem, ext));
     if direct.is_file() {
@@ -526,6 +691,9 @@ fn find_sidecar(dir: &Path, stem: &str, ext: &str) -> Option<PathBuf> {
     })
 }
 
+/// Moves a file from `src` to `dst`. Tries a fast rename first (works when
+/// both paths are on the same filesystem); falls back to copy-then-delete
+/// if rename fails. If `src` and `dst` are the same path, does nothing.
 fn move_or_copy(src: &Path, dst: &Path) -> Result<(), String> {
     if src == dst {
         return Ok(());
@@ -543,6 +711,10 @@ fn move_or_copy(src: &Path, dst: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Reads a YouTube caption file (.srt or .vtt) and produces a clean plain-
+/// text version: dropping the block numbers, timing lines, format headers,
+/// and HTML-style tags, and collapsing consecutive duplicate lines (which
+/// rolling captions love to produce).
 fn captions_to_txt(path: &Path) -> Result<String, String> {
     let content =
         fs::read_to_string(path).map_err(|e| format!("Could not read captions: {}", e))?;
@@ -576,6 +748,19 @@ fn captions_to_txt(path: &Path) -> Result<String, String> {
     Ok(lines.join("\n"))
 }
 
+// -----------------------------------------------------------------------------
+// YouTube media download — calls yt-dlp to fetch the actual video or audio.
+// -----------------------------------------------------------------------------
+
+/// Downloads the actual media file (video or just audio, depending on
+/// `media_action`) into `output_dir`, named after `base`.
+///
+/// YouTube's available formats change without warning, so this function
+/// tries a sequence of "preferred -> still-good -> fallback" format strings.
+/// It moves to the next attempt only if the current one fails outright.
+/// `--embed-metadata` writes the title/description/etc. into the media
+/// file's container so apps like VLC, ffprobe, and MediaInfo can read it
+/// back later.
 fn download_media(
     app: &AppHandle,
     yt_dlp: &Path,
@@ -586,10 +771,14 @@ fn download_media(
     media_action: &str,
 ) -> Result<Vec<PathBuf>, String> {
     emit(app, "stage", "download", "Downloading YouTube media");
+    // Tell yt-dlp how to name the output: "<base>.<extension>".
     let outtmpl = output_dir
         .join(format!("{}.%(ext)s", base))
         .to_string_lossy()
         .to_string();
+    // Pick a list of yt-dlp format strings to try. For video we want H.264
+    // video + AAC audio in an MP4 container (most-compatible). For audio
+    // we want AAC inside an M4A container.
     let format_attempts = if media_action == "video" {
         vec![
             "bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a][acodec^=mp4a]/b[ext=mp4][vcodec^=avc1][acodec^=mp4a]",
@@ -671,6 +860,14 @@ fn download_media(
         .ok_or_else(|| "yt-dlp finished but no media file was found".to_string())
 }
 
+// -----------------------------------------------------------------------------
+// Audio preparation — turning whatever media we have into the WAV format
+// Whisper expects.
+// -----------------------------------------------------------------------------
+
+/// Uses ffmpeg to extract a 16 kHz mono 16-bit WAV file from any audio or
+/// video input. whisper.cpp specifically wants that format, so we always
+/// transcode before transcribing.
 fn convert_to_wav(
     app: &AppHandle,
     ffmpeg: &Path,
@@ -683,6 +880,13 @@ fn convert_to_wav(
         "ffmpeg",
         "Extracting 16 kHz mono WAV with ffmpeg",
     );
+    // ffmpeg flags:
+    //   -y               overwrite any existing output file
+    //   -i <input>       the input file
+    //   -vn              skip the video stream (audio only)
+    //   -acodec pcm_s16le  16-bit signed little-endian PCM samples
+    //   -ar 16000        16 kHz sample rate
+    //   -ac 1            mono (one channel)
     let args = vec![
         "-y".to_string(),
         "-i".to_string(),
@@ -700,6 +904,13 @@ fn convert_to_wav(
     Ok(output.to_path_buf())
 }
 
+// -----------------------------------------------------------------------------
+// Whisper — local speech-to-text using whisper.cpp.
+// -----------------------------------------------------------------------------
+
+/// Runs whisper-cli against the prepared WAV file and writes both .txt and
+/// .srt outputs. Optionally feeds in a prompt (free-form vocabulary hints —
+/// names, technical terms) and a max subtitle line length.
 fn run_whisper(
     app: &AppHandle,
     whisper_cli: &Path,
@@ -747,6 +958,14 @@ fn run_whisper(
     Ok(outputs)
 }
 
+// -----------------------------------------------------------------------------
+// Folder-scanning helpers — figuring out which files yt-dlp / whisper / ffmpeg
+// actually produced, after the fact.
+// -----------------------------------------------------------------------------
+
+/// Returns the most recently modified file in `dir` with any of the given
+/// extensions. Used to grab "whatever caption file yt-dlp just wrote" when
+/// we don't know in advance whether it'll be .srt or .vtt.
 fn newest_file_with_exts(dir: &Path, extensions: &[&str]) -> Option<PathBuf> {
     fs::read_dir(dir)
         .ok()?
@@ -767,6 +986,8 @@ fn newest_file_with_exts(dir: &Path, extensions: &[&str]) -> Option<PathBuf> {
         .max_by_key(|path| path.metadata().and_then(|m| m.modified()).ok())
 }
 
+/// Lists every audio or video file in `dir` (regardless of name) using a
+/// fixed list of recognized container extensions.
 fn media_files(dir: &Path) -> Option<Vec<PathBuf>> {
     let extensions = [
         "mp4", "m4a", "mp3", "webm", "mkv", "mov", "aac", "opus", "ogg",
@@ -791,6 +1012,9 @@ fn media_files(dir: &Path) -> Option<Vec<PathBuf>> {
     Some(files)
 }
 
+/// Of all media files in `dir`, returns only the ones whose name exactly
+/// matches our chosen base (e.g. `<base>.mp4`). This is the *finished*
+/// download — not yt-dlp's intermediate per-stream artifacts.
 fn downloaded_media_files(dir: &Path, base: &str) -> Option<Vec<PathBuf>> {
     Some(
         media_files(dir)?
@@ -800,6 +1024,10 @@ fn downloaded_media_files(dir: &Path, base: &str) -> Option<Vec<PathBuf>> {
     )
 }
 
+/// Returns the *intermediate* per-format files yt-dlp leaves behind during
+/// adaptive downloads — things like `<base>.f137.mp4` (video stream) and
+/// `<base>.f140.m4a` (audio stream). We delete these as cleanup after the
+/// merged output file is in place.
 fn yt_dlp_format_artifacts(dir: &Path, base: &str) -> Option<Vec<PathBuf>> {
     Some(
         media_files(dir)?
@@ -809,6 +1037,8 @@ fn yt_dlp_format_artifacts(dir: &Path, base: &str) -> Option<Vec<PathBuf>> {
     )
 }
 
+/// True if the file's name (without extension) is exactly the base we chose.
+/// Helps us tell `<base>.mp4` (keep) apart from `<base>.f137.mp4` (cleanup).
 fn media_file_matches_base(path: &Path, base: &str) -> bool {
     path.file_stem()
         .and_then(OsStr::to_str)
@@ -816,6 +1046,9 @@ fn media_file_matches_base(path: &Path, base: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// True if the file's name follows yt-dlp's per-stream pattern
+/// `<base>.f<digits>` — meaning it's a transient download artifact, not the
+/// final merged output.
 fn media_file_is_format_artifact(path: &Path, base: &str) -> bool {
     path.file_stem()
         .and_then(OsStr::to_str)
@@ -825,6 +1058,9 @@ fn media_file_is_format_artifact(path: &Path, base: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Sorts files newest-first by last-modified time. Used so we always reach
+/// for the result of the latest yt-dlp run when there are multiple
+/// candidates.
 fn newest_first(files: Vec<PathBuf>) -> impl Iterator<Item = PathBuf> {
     let mut files = files;
     files.sort_by_key(|path| path.metadata().and_then(|m| m.modified()).ok());
@@ -832,6 +1068,10 @@ fn newest_first(files: Vec<PathBuf>) -> impl Iterator<Item = PathBuf> {
     files.into_iter()
 }
 
+/// Of a list of media files, returns the first one that actually contains
+/// an audio stream (ffmpeg will tell us if there is one). Avoids the
+/// frustrating case where yt-dlp delivered a video-only stream that
+/// Whisper can't transcribe.
 fn find_audio_media(ffmpeg: &Path, files: &[PathBuf]) -> Option<PathBuf> {
     files
         .iter()
@@ -839,6 +1079,8 @@ fn find_audio_media(ffmpeg: &Path, files: &[PathBuf]) -> Option<PathBuf> {
         .cloned()
 }
 
+/// Quick probe: ask ffmpeg to inspect a file, and look for the word
+/// "Audio:" in its stderr. If it's there, the file contains an audio stream.
 fn media_has_audio(ffmpeg: &Path, path: &Path) -> bool {
     let args = vec![
         "-hide_banner".to_string(),
@@ -856,6 +1098,9 @@ fn media_has_audio(ffmpeg: &Path, path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Validates that an optional path from the UI was provided AND points at
+/// a file that exists. Returns a friendly error message if either check
+/// fails. Used for things like the Whisper model path.
 fn require_path(value: Option<String>, label: &str) -> Result<PathBuf, String> {
     let Some(value) = value else {
         return Err(format!("{} is required", label));
@@ -871,6 +1116,9 @@ fn require_path(value: Option<String>, label: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// Deletes a list of files and/or folders. Reports each successful deletion
+/// to the log panel and warns on any that couldn't be removed. Returns the
+/// list of paths that were actually cleaned up.
 fn clean_paths(app: &AppHandle, paths: &[PathBuf]) -> Vec<String> {
     let mut cleaned = Vec::new();
     for path in paths {
@@ -902,6 +1150,15 @@ fn clean_paths(app: &AppHandle, paths: &[PathBuf]) -> Vec<String> {
     cleaned
 }
 
+// =============================================================================
+// Tauri commands — these are the four entry points the UI can call.
+// `#[tauri::command]` registers each one with the Tauri runtime so JavaScript
+// can `invoke()` it by name.
+// =============================================================================
+
+/// Tauri command: inspect the local machine and report which CLI tools and
+/// Whisper models are available. The UI calls this on launch and whenever
+/// the user clicks "Check Tools".
 #[tauri::command]
 fn check_environment() -> EnvironmentReport {
     let tools = detect_tools();
@@ -927,8 +1184,22 @@ fn check_environment() -> EnvironmentReport {
     }
 }
 
+/// Tauri command: the big one. Handles every variation of the YouTube URL
+/// tab — captions only, Whisper only, hybrid merge, media download, and
+/// every combination. The flow at a high level:
+///
+///   1. Set up an output folder and a scratch temp folder.
+///   2. Look up the video's title (so output files are named after it).
+///   3. If captions were requested, ask yt-dlp for them + the metadata
+///      sidecars.
+///   4. If we need audio (because the user asked for Whisper or just media),
+///      download it with yt-dlp.
+///   5. If Whisper was requested, transcode to WAV and run whisper-cli.
+///   6. If Hybrid mode was requested, merge the two transcripts.
+///   7. Clean up temp files and return the final list of outputs.
 #[tauri::command]
 fn run_youtube_job(app: AppHandle, request: YoutubeJobRequest) -> Result<JobResult, String> {
+    // 1. Make sure the output folder exists and grab the CLI tool paths.
     let output_dir = PathBuf::from(request.output_dir.trim());
     fs::create_dir_all(&output_dir)
         .map_err(|e| format!("Could not create output folder: {}", e))?;
@@ -941,12 +1212,17 @@ fn run_youtube_job(app: AppHandle, request: YoutubeJobRequest) -> Result<JobResu
     let whisper_cli = tools.whisper_cli;
     let temp_dir = unique_temp_dir(&output_dir)?;
     let mut outputs = Vec::new();
+    // Things we'll delete at the end (the temp folder itself, plus anything
+    // we downloaded but won't be keeping).
     let mut cleanup_candidates = vec![temp_dir.clone()];
 
     emit(&app, "stage", "setup", "Preparing YouTube job");
+    // 2. Resolve the video's title — used to name all output files.
     let base = get_youtube_title(&yt_dlp, &request.url);
     emit(&app, "info", "setup", format!("Output prefix: {}", base));
 
+    // 3. Captions phase — does this job need YouTube's existing captions?
+    // (Captions are required for any mode except "whisper only" or "media only".)
     let captions_requested = matches!(
         request.transcript_source.as_str(),
         "captions_fallback" | "captions_only" | "both" | "hybrid"
@@ -1001,9 +1277,14 @@ fn run_youtube_job(app: AppHandle, request: YoutubeJobRequest) -> Result<JobResu
         }
     }
 
+    // 4-5. Decide whether we need to download media, run Whisper, or both.
+    // `media_only` means the user wants the video file but no transcript.
+    // `whisper_requested` is true any time we'll be running whisper-cli.
     let media_only = request.transcript_source == "none";
     let whisper_requested = match request.transcript_source.as_str() {
         "whisper_only" | "both" | "hybrid" => true,
+        // For "captions if available, otherwise Whisper", only run Whisper
+        // when captions were missing.
         "captions_fallback" => !had_captions,
         _ => false,
     };
@@ -1011,6 +1292,9 @@ fn run_youtube_job(app: AppHandle, request: YoutubeJobRequest) -> Result<JobResu
     let mut whisper_srt_path: Option<PathBuf> = None;
 
     if should_download_media(media_only, request.keep_media, whisper_requested) {
+        // If the user wants to keep the media, download it straight into
+        // the output folder. Otherwise we download into a temp folder that
+        // gets cleaned up at the end.
         let media_output_dir = if request.keep_media || media_only {
             output_dir.clone()
         } else {
@@ -1093,6 +1377,10 @@ fn run_youtube_job(app: AppHandle, request: YoutubeJobRequest) -> Result<JobResu
         }
     }
 
+    // 6. Hybrid merge — only runs if the user picked Hybrid mode AND we
+    // actually ended up with both transcripts. If captions were missing
+    // (or Whisper somehow didn't produce SRT), we just skip the merge
+    // and ship whatever transcripts we have.
     if request.transcript_source == "hybrid" {
         if let (Some(whisper_srt), Some(yt_srt)) =
             (whisper_srt_path.as_ref(), youtube_srt_path.as_ref())
@@ -1149,6 +1437,7 @@ fn run_youtube_job(app: AppHandle, request: YoutubeJobRequest) -> Result<JobResu
         }
     }
 
+    // 7. Remove the temp folder and any intermediate downloads.
     emit(&app, "stage", "cleanup", "Cleaning temporary files");
     let cleaned = clean_paths(&app, &cleanup_candidates);
     emit(&app, "stage", "done", "Job complete");
@@ -1160,6 +1449,9 @@ fn run_youtube_job(app: AppHandle, request: YoutubeJobRequest) -> Result<JobResu
     })
 }
 
+/// Tauri command: handles the Local Media tab — transcribing a file that's
+/// already on disk. Optionally just converts it to WAV, or just runs
+/// Whisper on an already-WAV file, or does both.
 #[tauri::command]
 fn run_local_job(app: AppHandle, request: LocalJobRequest) -> Result<JobResult, String> {
     let input = PathBuf::from(request.input_file.trim());
@@ -1221,6 +1513,11 @@ fn run_local_job(app: AppHandle, request: LocalJobRequest) -> Result<JobResult, 
     })
 }
 
+/// Tauri command: handles the Merge Transcripts tab. Takes a Whisper SRT
+/// and a YouTube SRT (plus an optional .info.json), produces the hybrid
+/// `.hybrid.srt` + `.hybrid.txt` outputs without doing any downloading or
+/// Whisper-running. Useful when you already have both transcripts on hand
+/// and just want the merge.
 #[tauri::command]
 fn run_hybrid_merge_job(app: AppHandle, request: MergeJobRequest) -> Result<JobResult, String> {
     let whisper_srt = PathBuf::from(request.whisper_srt.trim());
@@ -1317,6 +1614,10 @@ fn run_hybrid_merge_job(app: AppHandle, request: MergeJobRequest) -> Result<JobR
     })
 }
 
+// =============================================================================
+// Unit tests — run via `cargo test`. These only verify a few small helpers;
+// the heavy testing happens against `hybrid.rs`'s pure functions.
+// =============================================================================
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1340,6 +1641,14 @@ mod tests {
     }
 }
 
+// =============================================================================
+// Application entry point. `main.rs` calls this; it boots up the Tauri
+// runtime, registers our commands, and shows the app window.
+// =============================================================================
+
+/// Boots the Tauri app. Installs two helper plugins (opener, for revealing
+/// files in Finder; dialog, for the "Browse" file pickers) and registers
+/// the four `#[tauri::command]` functions above so the UI can invoke them.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
