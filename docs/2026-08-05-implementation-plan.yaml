@@ -1,0 +1,533 @@
+# =============================================================================
+# MACHINE-READABLE IMPLEMENTATION PLAN
+# Next agent: read this ENTIRE file before taking any action. It is the
+# execution source of truth and supersedes sections 6-7 of
+# docs/2026-08-05-modernization-and-mcp-report.md (which retains the rationale).
+# Every fact below was verified on the live machine on 2026-08-05 unless a step
+# says otherwise. Line numbers refer to HEAD b794707.
+# =============================================================================
+schema: implementation-plan/v1
+date: 2026-08-05
+repo: /Users/danielaguilar/Developer/youtube-transcribe-rebuild
+authored_by: >
+  Claude (Opus 5), session a33d573f, after a 5-agent verification workflow
+  (wf_8a094bb1-81e: git-forensics, code-map, env-audit, research, adversarial
+  plan-critic; 334k tokens, 75 tool calls) whose blocking findings are folded in.
+read_first:
+  - docs/2026-08-05-modernization-and-mcp-report.md   # rationale + history
+  - docs/hybrid-transcript-feature.md                  # merge-engine design
+  - src-tauri/src/lib.rs                               # pipeline (1665 lines)
+  - src-tauri/src/hybrid.rs                            # merge engine (1018 lines, sink-free)
+
+operating_rules:
+  - Commit at every step boundary marked commit:true. Commit messages are memory
+    entries for a future agent - what changed, WHY, and what was decided (owner
+    convention, ~/.claude/CLAUDE.md).
+  - >-
+    After each phase, run the saved verification workflow —
+    Workflow({name: "verify-implementation", args: {phase: "<P1|P1.5|P2|P3|all>"}})
+    — and do not proceed while pass=false.
+  - Steps marked confirm_with_user:true require asking Danny first (AskUserQuestion).
+  - Date and attribute every claim written into docs.
+  - If a verify block fails, STOP and diagnose; do not improvise around it.
+
+# -----------------------------------------------------------------------------
+facts_verified_2026-08-05:
+  host: "Apple M2 Pro (arm64), macOS 26.6 build 25G5028f; Rosetta installed and running (oahd)"
+  deadline: "Apple HT102527 (2026-02-16): Rosetta available through macOS 27; effectively gone in macOS 28 (games-only carve-out)"
+  git:
+    head: b794707 (main, UNPUSHED; parent e0d9226 == origin/main)
+    stash: "stash@{0} = stale pre-PR#1 draft; audited line-by-line: ZERO semantic content absent from origin/main (19 raw-unique lines are all comment-stripped duplicates). Untracked half lives in stash@{0}^3; 'git stash show' needs -u to see it. Disposition: owner drops when satisfied."
+    branch_leftover: "claude/condescending-faraday-eb54fa @ fcfe46f (local+origin) was SQUASH-merged as e0d9226 (PR #1) -> 'git branch --merged' will NOT list it; subsumption must be checked by tree diff. Worktree at .claude/worktrees/condescending-faraday-eb54fa IS git-registered (detached, clean)."
+    github: "repo Daguilar0123/youtube-transcribe-rebuild is PUBLIC; 0 issues, 0 releases, 1 merged PR (#1)"
+  architectures:   # the Rosetta problem is deeper than the app binary
+    rustup_shims: "x86_64 (~/.cargo/bin/rustup itself) - installing an aarch64 toolchain alone is INSUFFICIENT; rustup-init must be re-run"
+    rust_toolchain: "stable-x86_64-apple-darwin, only toolchain, only target"
+    cmake: "/usr/local/bin/cmake x86_64 - a whisper rebuild via this cmake reuses the x86_64 CMakeCache and silently produces x86_64 again"
+    ffmpeg: "/usr/local/Cellar/ffmpeg/7.1_4 x86_64"
+    whisper_cli: "~/whisper.cpp/build/bin/whisper-cli x86_64 (links libggml-metal.dylib but CANNOT use the GPU under Rosetta); checkout v1.7.4-33-g7ffcd05 (2025-01-21), clean tree; upstream latest v1.9.2 (2026-08-04)"
+    app_binary: "target/release/bundle/.../youtube-transcribe-rebuild x86_64"
+    node: "arm64 (nvm v24.15.0) - frontend toolchain needs no migration"
+    make: "GNU Make 3.81 (2006) - fine for cmake-driven builds"
+    clt: "/Library/Developer/CommandLineTools present; cmake 3.31.5"
+  yt_dlp_three_installs:   # CRITICAL - the app does not use the copy you think
+    app_resolves: "/usr/local/bin/yt-dlp -> Intel-brew 2026.03.17 (path_entries() checks /usr/local/bin BEFORE user PATH; lib.rs:171). Caption path TESTED WORKING 2026-08-05."
+    shell_resolves: "~/Library/Python/3.12/bin/yt-dlp pip 2026.07.04 (upgraded 2026-08-05; universal2 python.framework interpreter)"
+    convergence: "After step N2, /opt/homebrew/bin/yt-dlp (ARM brew) wins for the app because /opt/homebrew/bin is FIRST in path_entries()."
+  homebrew: "split-brain: /usr/local (Intel, 122 pkgs, brew 6.0.11, active on shell PATH) vs /opt/homebrew (ARM, 0 pkgs, brew 4.4.19, functional). /opt/homebrew/bin NOT on shell PATH."
+  models: "exactly one real model: ~/whisper.cpp/models/ggml-medium.en.bin (1.4G); everything else is a for-tests stub already filtered by scan_models()"
+  build_health: "cargo check clean; cargo test --lib 13/13; npx tsc --noEmit clean (all at b794707)"
+  token_economics: "captions_to_txt dedupe: 51.1% reduction vs raw SRT on a 10-min video (16,837 -> 8,236 chars). A single .info.json is ~1.06MB (~265k tokens) - NEVER return it raw from any tool."
+  old_applications_stub: "/Applications/YouTube Transcribe.app is a 2025-05-13 Automator stub (com.apple.automator), NOT this app; Danny's launch path still hits it"
+
+decisions_by_owner:   # Danny confirms (2026-08-05)
+  audience_now: "just me, on this Mac"
+  deferred_iphone: "personal iOS version LATER; do not build now. iOS cannot spawn subprocesses -> phone must be a CLIENT of this Mac's headless core, not a port. The M1 refactor is the shared foundation."
+  deferred_release: "public GitHub release LATER; records these prereqs NOW: universal binary, Developer ID signing + notarization, dependency bundling story"
+  sequencing: "fix-native first, then MCP ('do what you recommend')"
+
+invariants:   # violate none of these
+  - NEVER return raw info.json (or any unprojected yt-dlp -J output) from an MCP tool (~265k tokens).
+  - MCP results are ENVELOPES (status, title, model_used, file paths, counts), never bulk payloads; inline transcript text only when the file is <= 16000 bytes.
+  - Internal request structs are serde camelCase (lib.rs:95,109,121); MCP-facing param structs are separate snake_case types converted in code - do not expose camelCase keys to MCP clients.
+  - hybrid.rs is already sink-free (build_hybrid takes no AppHandle); do not touch it in the M1 refactor.
+  - "path_entries() order (/opt/homebrew/bin first, lib.rs:171) is LOAD-BEARING: dependency convergence targets /opt/homebrew. Do not reorder it."
+  - The ProgressSink must support streaming line-level messages, not just stage transitions (run_command pipes child stdout/stderr through emit()).
+  - All child processes stay argv-array spawns (no shell). The residual injection surface is URL-as-option, URL schemes, and paths - guarded in M3.
+
+symbol_map:   # verified at b794707; re-grep before editing, these shift after M1
+  src-tauri/src/lib.rs:
+    JobEvent: 58
+    DependencyStatus: 67
+    EnvironmentReport: 76
+    JobResult: 85
+    YoutubeJobRequest: 95        # camelCase serde
+    LocalJobRequest: 109         # camelCase serde
+    MergeJobRequest: 121         # camelCase serde
+    ToolPaths: 132
+    emit: 146
+    path_entries: 171
+    detect_tools: 214
+    scan_models: 247
+    run_command: 354             # clones AppHandle into stdout/stderr reader THREADS (thread::spawn => 'static)
+    CaptionDownload: 520
+    download_captions: 532
+    collect_metadata_sidecars: 631
+    captions_to_txt: 718
+    download_media: 764
+    convert_to_wav: 871
+    run_whisper: 914             # flags: -m -f -otxt -osrt -of [--max-len] [--prompt]
+    clean_paths: 1122
+    check_environment: 1163
+    run_youtube_job: 1201
+    run_local_job: 1456
+    run_hybrid_merge_job: 1522
+  src-tauri/src/hybrid.rs:
+    HybridResult: 60             # derives Debug only - add Serialize if the envelope wants it
+    build_hybrid: 121            # (whisper_srt, youtube_srt, info_json Option, out_txt, out_srt, out_flagged) -> Result<HybridResult, String>
+  apphandle_refactor_scope:      # exactly these 11 functions; nothing else takes AppHandle
+    [emit, run_command, download_captions, collect_metadata_sidecars, download_media,
+     convert_to_wav, run_whisper, clean_paths, run_youtube_job, run_local_job, run_hybrid_merge_job]
+
+external_facts:   # researched 2026-08-05, with sources in the report's workflow output
+  rmcp: "official Rust MCP SDK, crates.io 3.1.1 (2026-08-05), MSRV 1.88 (rustc here is 1.95), tokio-based, schemars for tool schemas. Macros: #[tool_router] on impl, #[tool(description=...)] on methods, #[tool_handler] on ServerHandler impl; launch: service.serve(stdio()).await. API broke at 3.0.0 (2026-07-28) - distrust pre-3.0 examples; check docs.rs/rmcp/3.1.1 for exact feature names before pinning."
+  mcp_protocol: "stable revision 2026-07-28 (negotiated at initialize); stdio framing is newline-delimited JSON-RPC 2.0, one object per line, NO Content-Length; stderr is free for logs, stdout is protocol-only"
+  whisper_cpp: "latest tag v1.9.2; on macOS arm64 plain 'cmake -B build && cmake --build build -j --config Release' enables Metal BY DEFAULT (GGML_METAL_DEFAULT ON). Optional Core ML encoder: -DWHISPER_COREML=1 (needs .mlmodelc). Flag family is GGML_*, not WHISPER_METAL."
+  tauri_universal: "npm run tauri build -- --target universal-apple-darwin; requires BOTH rustup targets (aarch64-apple-darwin, x86_64-apple-darwin) or it errors; tauri runs lipo itself. DEFERRED to release time (see deferred)."
+  ytdlp_impersonation: "pip install 'yt-dlp[default,curl-cffi]' enables --impersonate chrome; brew formula bundles curl-cffi already"
+  claude_mcp: "claude mcp add --scope user --transport stdio <name> -- <abs-cmd> [args]; project .mcp.json = {mcpServers:{name:{command,args,env,timeout(ms)}}}; ${VAR} expansion supported; stdio entries need no 'type'"
+  skills: "user-level skill = ~/.claude/skills/<name>/SKILL.md, YAML frontmatter (description drives auto-trigger) + markdown body; hot-reloaded"
+  ci_runners: "repo is PUBLIC -> GitHub macOS runners free; macos-15 image is arm64"
+
+# -----------------------------------------------------------------------------
+# STEPS. Execute in order. depends_on is explicit where non-linear.
+# -----------------------------------------------------------------------------
+steps:
+
+  # ---------- H: housekeeping (pre-implementation) ----------
+  - id: H1
+    phase: P0.5
+    title: Push main
+    why: origin/main is 1 behind (b794707 has the audit report + caption fix). Branch-subsumption checks and the PR-body memory convention both want origin current.
+    commands:
+      - git -C /Users/danielaguilar/Developer/youtube-transcribe-rebuild push origin main
+    verify:
+      - cmd: git -C /Users/danielaguilar/Developer/youtube-transcribe-rebuild status -sb
+        expect: "## main...origin/main (no ahead/behind)"
+    commit: false
+
+  - id: H2
+    phase: P0.5
+    title: Verify squash-merged branch is subsumed, by TREE DIFF
+    why: "PR #1 was a squash; 'git branch --merged' will NOT list the branch. The correct check is content: diff the branch tip against main and require main to be a strict superset."
+    depends_on: [H1]
+    commands:
+      - git -C /Users/danielaguilar/Developer/youtube-transcribe-rebuild diff claude/condescending-faraday-eb54fa main --stat
+    verify:
+      - expect: "diff shows ONLY additions on main's side (docs/, .gitignore, .claude/workflows/, .github/); NOTHING removed relative to the branch. If anything on the branch is missing from main, STOP - do not delete the branch."
+    commit: false
+
+  - id: H3
+    phase: P0.5
+    title: Remove leftover worktree and squash-merged branch
+    why: The worktree is a registered git worktree (NOT an rm -rf target) left by the cloud session that built PR #1. The branch content is preserved forever in PR #1 and in origin/main.
+    depends_on: [H2]
+    confirm_with_user: true   # push --delete is outward-facing and irreversible on origin
+    commands:
+      - git -C /Users/danielaguilar/Developer/youtube-transcribe-rebuild worktree remove .claude/worktrees/condescending-faraday-eb54fa
+      - git -C /Users/danielaguilar/Developer/youtube-transcribe-rebuild branch -D claude/condescending-faraday-eb54fa
+      - git -C /Users/danielaguilar/Developer/youtube-transcribe-rebuild push origin --delete claude/condescending-faraday-eb54fa
+    rollback: "local branch recoverable from reflog until gc; remote tip recoverable from PR #1 head sha fcfe46f via GitHub"
+    verify:
+      - cmd: git -C /Users/danielaguilar/Developer/youtube-transcribe-rebuild worktree list
+        expect: only the main checkout
+    commit: false
+
+  # ---------- N: native toolchain (P1) ----------
+  - id: N1
+    phase: P1
+    title: Reinstall rustup as arm64 (shims included)
+    why: "CRITIC-VERIFIED: ~/.cargo/bin/rustup itself is x86_64. Installing an aarch64 toolchain under it leaves every cargo call routed through Intel shims that die with Rosetta. Re-running rustup-init from the native shell replaces the shims and preserves ~/.rustup toolchains."
+    commands:
+      - "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-host aarch64-apple-darwin --default-toolchain stable"
+      - source "$HOME/.cargo/env"
+      - rustup target add x86_64-apple-darwin   # for the DEFERRED universal release build
+    verify:
+      - cmd: file -b "$(readlink -f ~/.cargo/bin/rustup)"
+        expect: contains arm64
+      - cmd: rustc -vV | grep host
+        expect: "host: aarch64-apple-darwin"
+      - cmd: rustup show
+        expect: no "running under emulation" warning
+    cleanup_optional: "rustup toolchain uninstall stable-x86_64-apple-darwin  # only AFTER P1.5's arm build succeeds"
+    commit: false
+
+  - id: N2
+    phase: P1
+    title: Install ARM ffmpeg + yt-dlp + cmake via /opt/homebrew, fix shell PATH
+    why: >
+      ffmpeg: app picks /opt/homebrew/bin automatically (path_entries first).
+      yt-dlp: CRITIC-VERIFIED the app currently resolves the Intel-brew copy at
+      /usr/local/bin (2026.03.17); ARM brew wins the search order and converges
+      all three installs. cmake: the only cmake is x86_64 and would silently
+      rebuild whisper.cpp as Intel (N3 depends on this).
+    confirm_with_user: true   # edits ~/.zprofile (personal shell config)
+    commands:
+      - /opt/homebrew/bin/brew update
+      - /opt/homebrew/bin/brew install ffmpeg yt-dlp cmake
+      - 'grep -q "opt/homebrew/bin/brew shellenv" ~/.zprofile 2>/dev/null || echo ''eval "$(/opt/homebrew/bin/brew shellenv)"'' >> ~/.zprofile'
+    verify:
+      - cmd: lipo -archs /opt/homebrew/bin/ffmpeg
+        expect: arm64
+      - cmd: /opt/homebrew/bin/yt-dlp --version
+        expect: ">= 2026.07"
+      - cmd: file -b "$(readlink -f /opt/homebrew/bin/cmake)"
+        expect: contains arm64
+    cleanup_optional: "/usr/local/bin/brew uninstall yt-dlp ffmpeg  # retire Intel duplicates AFTER the app is confirmed working on ARM copies; full Intel-brew-tree retirement is a deferred owner decision (before macOS 27)"
+    commit: false
+
+  - id: N3
+    phase: P1
+    title: Rebuild whisper.cpp native (arm64 + Metal)
+    why: "Single largest performance win: x86_64 whisper-cli cannot touch the M2 Pro GPU under Rosetta. Metal is ON by default for a plain arm64 cmake build. MUST rm -rf build (x86_64 CMakeCache poisons in-place reconfigure) and MUST use the ARM cmake from N2."
+    depends_on: [N2]
+    commands:
+      - git -C ~/whisper.cpp fetch --tags origin
+      - git -C ~/whisper.cpp checkout v1.9.2
+      - rm -rf ~/whisper.cpp/build
+      - /opt/homebrew/bin/cmake -S ~/whisper.cpp -B ~/whisper.cpp/build -DCMAKE_OSX_ARCHITECTURES=arm64
+      - /opt/homebrew/bin/cmake --build ~/whisper.cpp/build -j --config Release
+    verify:
+      - cmd: lipo -archs ~/whisper.cpp/build/bin/whisper-cli
+        expect: arm64
+      - cmd: ~/whisper.cpp/build/bin/whisper-cli --help 2>&1 | grep -cE 'max-len|--prompt|-otxt|-osrt|-of'
+        expect: all of run_whisper's flags still exist (lib.rs:914) - if any flag vanished at v1.9.2, STOP and adapt run_whisper first
+      - cmd: ~/whisper.cpp/build/bin/whisper-cli -m ~/whisper.cpp/models/ggml-medium.en.bin -f ~/whisper.cpp/samples/jfk.wav 2>&1 | grep -iE 'metal|ggml_metal'
+        expect: "Metal initialization lines present (whisper falls back to CPU SILENTLY if Metal init fails - absence of these lines is a FAILURE)"
+    rollback: git -C ~/whisper.cpp checkout 7ffcd05 && rebuild
+    note: "detect_tools() hardcodes ~/whisper.cpp/build/bin/whisper-cli - the path survives the rebuild. arm64e reports as arm64; fine."
+    commit: false
+
+  - id: N4
+    phase: P1
+    title: (Optional) download large-v3-turbo model
+    why: "Only one real model exists (medium.en). large-v3-turbo is the cheapest quality win on Metal. CAUTION: model_rank() (lib.rs) ranks any non-.en 'large' model ABOVE medium.en, so this silently becomes the UI default and the MCP default - acceptable (turbo is fast), and the MCP envelope echoes model_used (M4) precisely so this is never invisible."
+    depends_on: [N3]
+    commands:
+      - bash ~/whisper.cpp/models/download-ggml-model.sh large-v3-turbo
+    verify:
+      - cmd: ls -la ~/whisper.cpp/models/ggml-large-v3-turbo.bin
+        expect: "~1.6G file"
+    commit: false
+
+  # ---------- A: arch self-reporting (P1.5) - BEFORE the final bundle ----------
+  - id: A1
+    phase: P1.5
+    title: "Code: DependencyStatus.arch via Mach-O parse + UI banner"
+    why: "Turns the Apple article's manual Get-Info check into something the app does itself. Ordered BEFORE the final bundle so the daily-driver .app ships with it (critic: otherwise a second build is needed)."
+    edits:
+      - file: src-tauri/src/macho.rs (new)
+        spec: |
+          pub fn detect_arch(path: &Path) -> String
+          returns one of: "arm64" | "x86_64" | "universal" | "script:<inner>" | "unknown"
+          Parse rules (ENDIANNESS IS PER-HEADER - the critic flagged that naive
+          parsing passes its own wrong tests):
+          - read first 4096 bytes
+          - THIN Mach-O: on-disk LITTLE-ENDIAN. u32 LE at 0 == 0xfeedfacf (MH_MAGIC_64)
+            -> cputype u32 LE at 4: 0x0100000C => arm64 (arm64e shares cputype;
+            IGNORE cpusubtype, report arm64), 0x01000007 => x86_64.
+            Also accept byte-swapped magic (0xcffaedfe as LE u32) with BE cputype.
+          - FAT: header is BIG-ENDIAN. u32 BE at 0 == 0xcafebabe (fat32) or
+            0xcafebabf (fat64) -> nfat_arch u32 BE at 4, SANITY CAP nfat<=16
+            (0xcafebabe is also the Java .class magic; a huge nfat means not a
+            fat binary -> "unknown"). Entries at 8, stride 20 (fat32) / 32 (fat64),
+            cputype u32 BE at entry+0. >=2 distinct known arches => "universal";
+            exactly one => that arch.
+          - SHEBANG: bytes start "#!" -> take first whitespace-token as interpreter
+            path, fs::canonicalize it, recurse detect_arch ONCE (no deeper) ->
+            "script:" + result. (CRITIC: yt-dlp is ALWAYS a script; without shebang
+            resolution the x86-only banner can never fire for the one dependency
+            most likely to be Intel. e.g. Intel-brew yt-dlp -> script:x86_64 = WARN;
+            pip yt-dlp -> script:universal = fine.)
+          - anything else -> "unknown"
+          Unit tests REQUIRED: crafted byte arrays for thin-arm64, thin-x86_64,
+          fat-universal (BE!), java-class lookalike -> unknown, shebang tempfile
+          resolving to a real binary.
+      - file: src-tauri/src/lib.rs
+        spec: |
+          - mod macho; DependencyStatus gains arch: Option<String> (Serialize'd).
+          - check_environment() populates arch via macho::detect_arch on each
+            resolved tool path.
+      - file: src/main.ts + index.html + src/styles.css
+        spec: |
+          - render arch beside each dependency row
+          - banner (dismissable, non-blocking) when any dep arch is "x86_64" or
+            "script:x86_64": "Intel-only binary - stops working after macOS 27
+            (Rosetta removal). Install the Apple silicon version."
+    verify:
+      - cmd: cd src-tauri && cargo test
+        expect: 13 existing + new macho tests all pass
+      - cmd: npx tsc --noEmit
+        expect: clean
+    commit: true
+    commit_message_theme: "Add architecture self-reporting to environment check (Rosetta deadline: HT102527). Why: app must warn about Intel deps itself; Get-Info is manual. Decision: shebang resolves one level so script deps (yt-dlp) get real verdicts; arm64e reports arm64."
+
+  - id: A2
+    phase: P1.5
+    title: Build the native daily-driver bundle
+    depends_on: [N1, N2, N3, A1]
+    commands:
+      - npm run tauri build
+    verify:
+      - cmd: lipo -archs "src-tauri/target/release/bundle/macos/YouTube Transcribe Rebuild.app/Contents/MacOS/youtube-transcribe-rebuild"
+        expect: arm64
+      - manual: "open the app; environment panel shows every dependency arm64/universal with no warning banner"
+    commit: false
+
+  - id: A3
+    phase: P1.5
+    title: Install to /Applications, retire the 2025 Automator stub
+    why: "Danny's launch path still opens '/Applications/YouTube Transcribe.app' - a 2025-05-13 Automator applet unrelated to this repo. Without this step all of P1 is invisible to the owner."
+    depends_on: [A2]
+    confirm_with_user: true   # deletes (trashes) an app the owner may have history with
+    commands:
+      - ditto "src-tauri/target/release/bundle/macos/YouTube Transcribe Rebuild.app" "/Applications/YouTube Transcribe Rebuild.app"
+      - "osascript -e 'tell application \"Finder\" to delete POSIX file \"/Applications/YouTube Transcribe.app\"'   # Trash, not rm - recoverable"
+    verify:
+      - manual: "Finder Get Info on /Applications/YouTube Transcribe Rebuild.app -> Kind: Application (Apple silicon)"
+    commit: false
+
+  # ---------- M: MCP server (P2) ----------
+  - id: M1
+    phase: P2
+    title: "ProgressSink refactor - decouple pipeline from Tauri"
+    why: "Foundation for BOTH the MCP binary and the deferred iPhone client. Scope is exactly the 11 functions in symbol_map.apphandle_refactor_scope; hybrid.rs is untouched."
+    edits:
+      - file: src-tauri/src/lib.rs
+        spec: |
+          - pub trait ProgressSink: Send + Sync { fn emit(&self, level: &str, stage: &str, message: &str); }
+          - MUST be used as Arc<dyn ProgressSink>, NOT &dyn: run_command (lib.rs:354)
+            moves the sink into thread::spawn'd stdout/stderr reader threads which
+            require 'static (CRITIC-VERIFIED: &dyn does not compile here). Threads
+            clone the Arc exactly as they clone AppHandle today.
+          - struct TauriSink(AppHandle) - impl via tauri::Emitter (current emit() body).
+          - struct StderrSink - writes "level/stage: message" lines to stderr
+            (MCP-safe: stdout is protocol-only). struct NullSink for tests.
+          - Extract cores with UNCHANGED behavior:
+            run_youtube_job_core(sink: Arc<dyn ProgressSink>, req: YoutubeJobRequest) -> Result<JobResult, String>
+            run_local_job_core(...), run_hybrid_merge_job_core(...)
+          - #[tauri::command] fns become 3-line wrappers: wrap app in Arc<TauriSink>, call core.
+          - Keep request structs' camelCase serde untouched (Tauri IPC contract).
+    verify:
+      - cmd: cd src-tauri && cargo test && cargo check
+        expect: all pass, no behavior change
+      - cmd: "grep -c 'AppHandle' src-tauri/src/lib.rs"
+        expect: "AppHandle appears ONLY in TauriSink + the 3 command wrappers"
+    commit: true
+    commit_message_theme: "Decouple pipeline from Tauri via ProgressSink (Arc<dyn>, thread-clone pattern). Why: one core for GUI + MCP + future iOS backend. Decision: Arc not &dyn because run_command's reader threads need 'static."
+
+  - id: M2
+    phase: P2
+    title: Feature-gated MCP binary scaffold
+    why: "required-features keeps tokio/rmcp OUT of the default build - the crate's staticlib crate-type is the future 'tauri ios build' path and must not drag a server stack into it (critic)."
+    depends_on: [M1]
+    edits:
+      - file: src-tauri/Cargo.toml
+        spec: |
+          [features] mcp = ["dep:rmcp", "dep:tokio", "dep:schemars"]
+          [dependencies] rmcp = { version = "3.1", optional = true, features = [<server + stdio transport - CONFIRM exact names on docs.rs/rmcp/3.1.1 before pinning>] }
+          tokio = { version = "1", features = ["macros", "rt-multi-thread"], optional = true }
+          schemars = { <match the version rmcp 3.1 re-exports/requires>, optional = true }
+          [[bin]] name = "yt-transcribe-mcp"  path = "src/bin/mcp/main.rs"  required-features = ["mcp"]
+    verify:
+      - cmd: cd src-tauri && cargo check                       # default features
+        expect: "clean AND does not build the bin or compile tokio/rmcp"
+      - cmd: cd src-tauri && cargo check --features mcp --bin yt-transcribe-mcp
+        expect: clean
+    commit: false
+
+  - id: M3
+    phase: P2
+    title: "Security guard module (all four critic vectors)"
+    edits:
+      - file: src-tauri/src/bin/mcp/guard.rs (new)
+        spec: |
+          validate_youtube_url(url) -> Result<String, String>:
+          - must start "https://" (kills leading-dash option injection AND non-http schemes)
+          - reject any whitespace/newline chars
+          - host allowlist: www.youtube.com, youtube.com, m.youtube.com,
+            music.youtube.com, youtu.be (kills SSRF via yt-dlp's generic extractor)
+          - reject pure playlist URLs (path starts /playlist) for ALL tools;
+            strip &list=/?list= params from watch URLs
+          confine_output_dir(requested: Option<String>) -> Result<PathBuf, String>:
+          - default: $HOME/Documents/Transcripts (create if absent)
+          - create requested dir, then fs::canonicalize BOTH it and the base;
+            require canonical(requested).starts_with(canonical($HOME/Documents/Transcripts))
+            (kills path traversal, symlink escapes, and move_or_copy's
+            delete-then-write landing outside the sandbox - lib.rs:697 removes
+            existing destination files)
+          confine_input_path(p) -> Result<PathBuf, String>:
+          - canonicalize; must exist; must start_with $HOME
+          - CONSENT MODEL (document in SKILL.md + README): within $HOME these
+            tools read model-supplied paths without per-file prompts once the
+            MCP server is allowlisted; that is the accepted tradeoff for a
+            single-user machine, and the $HOME confinement is the boundary.
+          ALSO (defense in depth, benefits the GUI too): in lib.rs, insert "--"
+          before the URL positional in get_youtube_title, download_captions,
+          download_media arg builders.
+          Unit tests REQUIRED: dash-URL, http://, file://, LAN host, playlist URL,
+          ../ traversal, symlink-escape via tempdir, nonexistent input.
+    verify:
+      - cmd: cd src-tauri && cargo test --features mcp
+        expect: guard tests pass
+    commit: false
+
+  - id: M4
+    phase: P2
+    title: MCP tools + envelope contract
+    depends_on: [M2, M3]
+    edits:
+      - file: src-tauri/src/bin/mcp/main.rs
+        spec: |
+          rmcp 3.1 server, name "yt-transcribe". Param structs: snake_case,
+          derive(Deserialize, JsonSchema); convert internally to the camelCase
+          request structs (construct in Rust - no serde roundtrip).
+          TOOLS:
+          1. youtube_metadata { url }
+             - guard url; run [yt-dlp, --no-playlist, -J, --, url] via detect_tools() path
+             - parse in-process; PROJECT ONLY: title, channel, uploader, duration_seconds,
+               upload_date, view_count, description (cap 4000 chars), caption_languages
+               (keys of subtitles + automatic_captions), webpage_url
+             - INVARIANT: raw -J output (~1MB) never leaves the process
+          2. youtube_transcript { url, mode: captions|whisper|hybrid, output_dir?,
+                                  model_path?, whisper_prompt?, max_len? }
+             - mode map: captions->captions_only, whisper->whisper_only, hybrid->hybrid
+             - media_action: "audio", keep_media: false
+             - model default when whisper/hybrid and model_path absent:
+               scan_models()[0] (today ggml-medium.en.bin; after N4, large-v3-turbo);
+               error with download instructions if none
+             - run run_youtube_job_core under tokio spawn_blocking
+          3. transcribe_local { path, mode: convert_transcribe|transcribe_only,
+                                output_dir?, model_path?, whisper_prompt?, max_len? }
+             -> run_local_job_core (guard input path)
+          4. hybrid_merge { whisper_srt, youtube_srt, info_json?, output_dir?, output_base? }
+             -> run_hybrid_merge_job_core (guard all input paths)
+          ENVELOPE (every job tool): { status, title_base, mode, model_used,
+            files: [{path, kind, bytes}], transcript_path (preference:
+            .hybrid.txt > .whisper.txt > .youtube-captions.txt),
+            replacements?, flagged_segments?, duration_ms,
+            inline_transcript? (ONLY if transcript file <= 16000 bytes) }
+          Larger transcripts: the CLIENT Reads transcript_path with offset/limit.
+          CONCURRENCY: one static tokio::sync::Mutex serializes tools 2-4
+          (metadata exempt) - same-base filename collisions and the shared-temp-dir
+          millisecond race (lib.rs unique_temp_dir) are real (critic); v1 policy
+          is serialize, not per-job UUID dirs.
+          PROGRESS: McpSink implements ProgressSink by forwarding emits as MCP
+          progress notifications when the client sent a progressToken (rmcp
+          RequestContext), else StderrSink. Progress notifications also keep
+          long whisper jobs alive past client tool timeouts.
+          PREFLIGHT in main(): output base writable; detect_tools() finds yt-dlp
+          + ffmpeg (+ whisper-cli when a model exists); clear stderr error if not.
+    verify:
+      - cmd: cd src-tauri && cargo test --features mcp && cargo check --features mcp --bin yt-transcribe-mcp
+        expect: clean
+    commit: true
+    commit_message_theme: "Add yt-transcribe-mcp: MCP stdio server over the shared pipeline core. Why: Claude reaches for WebFetch (measured 28/33 attempts) and gets one field; the app already produces clean artifacts 2x cheaper. Decisions: envelope-not-payload (16KB inline cap), 4-vector guard (https+allowlist, --, $HOME confinement, output sandbox), serialize jobs v1, model default = scan_models()[0] echoed as model_used."
+
+  - id: M5
+    phase: P2
+    title: Build, install, register, trigger
+    depends_on: [M4]
+    confirm_with_user: true   # writes user-scope MCP config + Danny's global CLAUDE.md
+    commands:
+      - cd src-tauri && cargo install --path . --bin yt-transcribe-mcp --features mcp
+        # -> ~/.cargo/bin/yt-transcribe-mcp: stable path, survives cargo clean
+        # (critic: a target/ symlink breaks on clean)
+      - claude mcp add --scope user --transport stdio yt-transcribe -- /Users/danielaguilar/.cargo/bin/yt-transcribe-mcp
+    edits:
+      - file: .mcp.json (repo root, committed)
+        spec: '{ "mcpServers": { "yt-transcribe": { "command": "${HOME}/.cargo/bin/yt-transcribe-mcp", "timeout": 3600000 } } }   # timeout ms: hour-long whisper jobs'
+      - file: ~/.claude/skills/youtube-transcript/SKILL.md (user-level, NOT in repo)
+        spec: |
+          frontmatter description (triggering): "Use whenever a YouTube URL appears
+          in the conversation or the user asks to transcribe, summarize, or analyze
+          a YouTube video or local audio/video file. Uses Danny's local
+          yt-transcribe MCP (yt-dlp + whisper.cpp + hybrid merge) instead of
+          WebFetch/WebSearch, which cannot read YouTube."
+          body: tool selection (metadata first when only facts are needed; captions
+          mode = fast default; hybrid = accuracy/proper nouns; whisper = no captions
+          or local file), envelope handling (Read transcript_path with offset/limit;
+          never ask for inline dumps), prohibitions (never WebFetch youtube.com,
+          never request raw info.json), consent-model note for local-file tools.
+      - file: ~/.claude/CLAUDE.md (append one backstop line, confirm first)
+        spec: "Given a YouTube URL, use the yt-transcribe MCP tools (youtube_metadata / youtube_transcript) - never WebFetch or WebSearch for the video's own content."
+    verify:
+      - cmd: claude mcp list
+        expect: yt-transcribe listed, connects
+    commit: true
+    commit_message_theme: "Register yt-transcribe MCP + repo .mcp.json. Why: measured 85% WebFetch reflex needs both a triggering skill and a CLAUDE.md backstop; user-scope registration + ~/.cargo/bin path survives cargo clean."
+
+  # ---------- D: docs + CI (P3) ----------
+  - id: D1
+    phase: P3
+    title: README + report currency pass
+    edits:
+      - file: README.md
+        spec: |
+          - Requirements: Apple silicon native deps (brew /opt/homebrew: ffmpeg,
+            yt-dlp, cmake; whisper.cpp arm64+Metal build), dated 2026-08-05
+          - New "MCP server" section: build cmd, tools, envelope contract, guard rules
+          - New "Release prerequisites (deferred)" section, dated: universal binary
+            (both rustup targets), Developer ID + notarization (Gatekeeper blocks
+            unsigned downloads), dependency bundling decision
+      - file: docs/2026-08-05-modernization-and-mcp-report.md
+        spec: already carries the post-verification corrections block; extend it only if implementation deviates from this plan
+    verify:
+      - manual: README claims match reality (spot-check three commands)
+    commit: true
+
+  - id: D2
+    phase: P3
+    title: CI goes live
+    why: ".github/workflows/ci.yml is COMMITTED ALONGSIDE THIS PLAN (repo is public -> macOS runners free). It runs npm build BEFORE cargo test because tauri::generate_context! requires ../dist to exist at compile time and dist/ is gitignored (critic: bare cargo test fails on a fresh runner)."
+    depends_on: [H1]
+    commands:
+      - git push origin main   # first push after ci.yml lands triggers the run
+    verify:
+      - cmd: gh run list --limit 1
+        expect: completed success
+    commit: false
+
+deferred:   # recorded so future plans do not rediscover them
+  - "Universal build: npm run tauri build -- --target universal-apple-darwin (both targets installed by N1) - at GitHub-release time; roughly doubles build time; low value for a single arm64 machine"
+  - "Developer ID signing + notarization - REQUIRED for the public release (Gatekeeper); locally-built arm64 gets ad-hoc linker signing and runs fine"
+  - "Dependency bundling vs discover-on-PATH - decide at release time; bundling would have hidden the yt-dlp staleness failure behind a release cycle"
+  - "iPhone: thin client of this Mac's core (Tauri iOS shell CANNOT spawn yt-dlp/ffmpeg/whisper). M1's ProgressSink core is the shared foundation; required-features (M2) keeps the server stack out of the iOS lib"
+  - "Intel Homebrew tree (/usr/local, 122 pkgs) retirement - owner decision before macOS 27"
+  - "stash@{0} drop - owner's call; audited semantic-zero on 2026-08-05"
+  - "Optional: pip install 'yt-dlp[default,curl-cffi]' if YouTube tightens further (impersonation); brew formula already bundles it"
+
+verification_workflow:
+  file: .claude/workflows/verify-implementation.js   # committed alongside this plan
+  invoke: 'Workflow({name: "verify-implementation", args: {phase: "P1"}})   # phases: P1, P1.5, P2, P3, all'
+  contract: "returns {phase, pass, agents:[{pass, checks:[{name, pass, evidence}], problems}]}; do not advance phases while pass=false"

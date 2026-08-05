@@ -10,6 +10,33 @@ inference rather than measurement are marked as such.
 
 ---
 
+## Post-verification corrections (2026-08-05, later the same day)
+
+A five-agent verification pass (workflow `wf_8a094bb1-81e`: git forensics, code map,
+environment audit, external research, adversarial plan critic) checked this report's
+claims. Three corrections, on record per the dated-provenance convention:
+
+1. **§4's "the app is broken" was over-claimed.** The app does not resolve the pip
+   `yt-dlp` my shell test exercised. `path_entries()` checks `/usr/local/bin` ahead of
+   the user's `PATH`, and an Intel-brew `yt-dlp` **2026.03.17** lives there (installed
+   2026-05-07). Tested directly: that copy downloads captions fine. So: the *pip* copy
+   (2025.04.30) was broken and is now fixed (2026.07.04), but the *app* was riding the
+   brew copy and its caption path likely worked. Three `yt-dlp` installs now coexist;
+   the implementation plan converges everything on ARM-brew.
+2. **§2's "6 unique lines" undercounted.** I examined only the tracked half of the
+   stash. The full audit (`git stash show` needs `-u` to reveal the untracked half,
+   stored in `stash@{0}^3`) finds **19** raw-unique lines — 6 in `lib.rs`, 13 in
+   `hybrid.rs`. The verdict is unchanged and now stronger: every one is a
+   comment-stripped duplicate of a line `origin/main` carries with a trailing comment;
+   normalized semantic content unique to the stash is **zero** in every file.
+3. **All `lib.rs` line references below are stale.** They describe the pre-pull tree
+   (`lib.rs` @ `2240c67`, 1,356 lines). Post-pull `lib.rs` is 1,665 lines — e.g.
+   `check_environment` moved from :905 to :1163. The current, verified symbol map lives
+   in `docs/2026-08-05-implementation-plan.yaml`, which supersedes §6–§7 of this report
+   as the execution source of truth.
+
+---
+
 ## 1. Chat-session archaeology
 
 ### What I searched

@@ -1,0 +1,53 @@
+# CI for youtube-transcribe-rebuild.
+# Added 2026-08-05 alongside docs/2026-08-05-implementation-plan.yaml.
+#
+# ORDERING IS LOAD-BEARING: `npm run build` must precede `cargo test` because
+# tauri::generate_context! embeds frontendDist ("../dist") at COMPILE time and
+# dist/ is gitignored — a bare cargo test on a fresh runner fails before running
+# a single test.
+#
+# macos-15 runners are Apple silicon (arm64) — this also exercises the native
+# build path the Rosetta-deadline work (Apple HT102527) migrates to. Repo is
+# public, so macOS runner minutes are free.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install frontend deps
+        run: npm ci
+
+      - name: Typecheck + build frontend (produces dist/ required by tauri codegen)
+        run: npm run build
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      # Once the mcp feature lands (plan step M2), also gate it:
+      - name: MCP feature check (skips until the feature exists)
+        run: |
+          if grep -q '^mcp = ' src-tauri/Cargo.toml; then
+            cargo check --manifest-path src-tauri/Cargo.toml --features mcp --bin yt-transcribe-mcp
+            cargo test --manifest-path src-tauri/Cargo.toml --features mcp
+          else
+            echo "mcp feature not present yet — skipping"
+          fi
