@@ -71,3 +71,8 @@ Icon?
 # Editor
 .vscode/
 .idea/
+
+# Claude Code scratch state. Worktrees are full duplicate checkouts created by
+# cloud/worktree sessions (e.g. the one that produced PR #1); they are throwaway
+# and should never be committed. Project-level Claude config is still trackable.
+.claude/worktrees/
