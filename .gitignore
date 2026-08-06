@@ -76,3 +76,7 @@ Icon?
 # cloud/worktree sessions (e.g. the one that produced PR #1); they are throwaway
 # and should never be committed. Project-level Claude config is still trackable.
 .claude/worktrees/
+
+# Feature worktrees per the CLAUDE.md protocol (worktrees by feature, not by
+# agent; kept out of .claude/ because of anthropics/claude-code#48967).
+.worktrees/

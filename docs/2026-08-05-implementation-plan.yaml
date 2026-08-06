@@ -28,6 +28,15 @@ operating_rules:
     Workflow({name: "verify-implementation", args: {phase: "<P1|P1.5|P2|P3|all>"}})
     — and do not proceed while pass=false.
   - Steps marked confirm_with_user:true require asking Danny first (AskUserQuestion).
+  - >-
+    ADDED 2026-08-06 — follow the repo CLAUDE.md branch+worktree protocol
+    (worktrees by feature): P1 is environment-only (no worktree). Repo-code
+    phases are features — P1.5 in .worktrees/arch-self-report on
+    feature/arch-self-report, P2 in .worktrees/mcp-server on feature/mcp-server.
+    You are the sole main-writer; merge --no-ff, test the MERGED result, push,
+    run the phase gate from main, then remove worktree + branch. Context
+    lifecycle and JSON handoff rules in CLAUDE.md apply (compact at most once,
+    then retire with a handoff in docs/handoffs/).
   - Date and attribute every claim written into docs.
   - If a verify block fails, STOP and diagnose; do not improvise around it.
 
