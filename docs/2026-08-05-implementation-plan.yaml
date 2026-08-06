@@ -128,6 +128,7 @@ steps:
   - id: H1
     phase: P0.5
     title: Push main
+    status: "DONE 2026-08-06 (session a33d573f): pushed e0d9226..3ddaec4; origin current"
     why: origin/main is 1 behind (b794707 has the audit report + caption fix). Branch-subsumption checks and the PR-body memory convention both want origin current.
     commands:
       - git -C /Users/danielaguilar/Developer/youtube-transcribe-rebuild push origin main
@@ -139,6 +140,7 @@ steps:
   - id: H2
     phase: P0.5
     title: Verify squash-merged branch is subsumed, by TREE DIFF
+    status: "DONE 2026-08-06: main vs branch tip differs by exactly 5 pure-ADDITION files (plan yaml, report, verify workflow, ci.yml, .gitignore); numstat deletion scan empty. Branch content fully subsumed."
     why: "PR #1 was a squash; 'git branch --merged' will NOT list the branch. The correct check is content: diff the branch tip against main and require main to be a strict superset."
     depends_on: [H1]
     commands:
@@ -150,6 +152,14 @@ steps:
   - id: H3
     phase: P0.5
     title: Remove leftover worktree and squash-merged branch
+    status: >-
+      VERIFIED-SAFE 2026-08-06, execution handed to owner: the permission
+      classifier blocks destructive git ops for agents in this mode. Owner runs
+      worktree remove / branch -D / push --delete, plus 'git stash drop
+      stash@{0}' (stash audited semantic-zero twice; recovery sha 08c6604 via
+      git fsck until gc). NEXT AGENT: check 'git worktree list' + 'git stash
+      list' first - if already clean, H3 is done; if not, ask the owner to run
+      the commands (prefix '!' in the prompt), do NOT attempt them yourself.
     why: The worktree is a registered git worktree (NOT an rm -rf target) left by the cloud session that built PR #1. The branch content is preserved forever in PR #1 and in origin/main.
     depends_on: [H2]
     confirm_with_user: true   # push --delete is outward-facing and irreversible on origin
@@ -524,7 +534,7 @@ deferred:   # recorded so future plans do not rediscover them
   - "Dependency bundling vs discover-on-PATH - decide at release time; bundling would have hidden the yt-dlp staleness failure behind a release cycle"
   - "iPhone: thin client of this Mac's core (Tauri iOS shell CANNOT spawn yt-dlp/ffmpeg/whisper). M1's ProgressSink core is the shared foundation; required-features (M2) keeps the server stack out of the iOS lib"
   - "Intel Homebrew tree (/usr/local, 122 pkgs) retirement - owner decision before macOS 27"
-  - "stash@{0} drop - owner's call; audited semantic-zero on 2026-08-05"
+  - "stash@{0} drop - owner's call; audited semantic-zero on 2026-08-05; recovery sha 08c6604761ebd23139b3e821d675465053fcfa9a (git fsck --unreachable finds it until gc)"
   - "Optional: pip install 'yt-dlp[default,curl-cffi]' if YouTube tightens further (impersonation); brew formula already bundles it"
 
 verification_workflow:
